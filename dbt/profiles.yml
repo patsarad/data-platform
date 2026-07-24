@@ -1,0 +1,15 @@
+data_platform:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
+      user: "{{ env_var('POSTGRES_USER', 'postgres') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'postgres') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'gaming_analytics') }}"
+      schema: "{{ env_var('POSTGRES_SCHEMA', 'analytics') }}"
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 10
+      retries: 1
