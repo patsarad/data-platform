@@ -1,1 +1,1 @@
-"""Storage package for future database helpers."""
+"""PostgreSQL raw storage helpers."""

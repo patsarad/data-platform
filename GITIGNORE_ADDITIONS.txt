@@ -1,0 +1,26 @@
+# Recommended additions to the repository root .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments / secrets
+.env
+.venv/
+
+# Local data
+/data/raw/
+
+# dbt generated artifacts
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+
+# Private project-owner material
+docs/portfolio/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
