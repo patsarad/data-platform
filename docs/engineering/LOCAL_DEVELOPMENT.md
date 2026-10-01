@@ -27,7 +27,8 @@ POSTGRES_PORT
 POSTGRES_DB
 POSTGRES_USER
 POSTGRES_PASSWORD
-POSTGRES_SCHEMA
+POSTGRES_RAW_SCHEMA
+DBT_SCHEMA
 ```
 
 Logging:
@@ -37,6 +38,12 @@ LOG_LEVEL
 ```
 
 Copy `.env.example` to `.env` only if `.env` does not already exist, then edit it for your environment. Never commit `.env`. Python loads it from the repository root without overriding already exported variables. dbt reads exported environment variables and does not load `.env` itself.
+
+### Schema names and existing `analytics` installations
+
+New installations use `POSTGRES_RAW_SCHEMA=raw` for all five Python-owned raw tables and `ingestion_runs`, and `DBT_SCHEMA=analytics` for future dbt-managed outputs. These are independent settings. Python and dbt both accept the older `POSTGRES_SCHEMA` as a fallback only when `POSTGRES_RAW_SCHEMA` is unset; if neither exists, both use `raw`. `DBT_SCHEMA` controls output independently and never selects raw sources. An existing `.env` with `POSTGRES_SCHEMA=analytics` therefore keeps Python pointed at its existing raw tables and ingestion history unless the new variable is explicitly set. Exported variables still take precedence over `.env` for Python; dbt requires export.
+
+Changing a variable or default does **not** move data or preserve a watermark in a different schema. Before the next ingestion run on an installation with raw tables in `analytics`, either keep `POSTGRES_SCHEMA=analytics` (or explicitly set `POSTGRES_RAW_SCHEMA=analytics`) to continue using those tables and history, or perform a deliberate transition: stop ingestion, back up the database, create/authorize `raw`, move all five `raw_<entity>` tables **and** `ingestion_runs` with their rows and constraints to `raw`, verify table counts and per-entity successful watermark ends, then set `POSTGRES_RAW_SCHEMA=raw` and remove the old setting. Do not run an uncapped incremental command against an empty `raw.ingestion_runs` expecting it to resume from `analytics.ingestion_runs`; it will bootstrap. Export the same source-schema settings for dbt that Python loads from `.env`; legacy `POSTGRES_SCHEMA=analytics` now works for both. An explicit `POSTGRES_RAW_SCHEMA` wins for both consumers. Source declarations do not move data.
 
 ## Local PostgreSQL on Apple Silicon
 
@@ -104,7 +111,7 @@ On Windows PowerShell, create the environment with `py -3.11 -m venv .venv` and 
 python -m pytest -q
 ```
 
-Use `python -m pytest` from the repository root so the active interpreter can import `src` without installing the project or setting `PYTHONPATH`. Tests use fake HTTP sessions and database connections; live integration tests are a future milestone.
+Use `python -m pytest` from the repository root so the active interpreter can import `src` without installing the project or setting `PYTHONPATH`. The default run uses fake HTTP sessions and database connections and skips database integration checks. With PostgreSQL running and configured through `.env` or exported settings, run `RUN_POSTGRES_INTEGRATION=1 python -m pytest -q tests/integration`. These checks use disposable schemas, clean up after failures, and never call IGDB. See [integration requirements and coverage](TESTING.md#postgresql-integration-tests).
 
 ## Current ingestion smoke run
 
@@ -122,19 +129,21 @@ python -m src.ingestion.run_ingestion --entity genres --batch-size 5 --max-batch
 python -m src.ingestion.run_ingestion --entity all --batch-size 5 --max-batches 1
 ```
 
-The first command requests at most 500 games and validates authentication, API access, JSONL output, and PostgreSQL loading. The configured database user must be able to create the schema/table and insert/update rows. The output is `data/raw/raw_games_<timestamp>.jsonl` and `<POSTGRES_SCHEMA>.raw_games`, using `analytics` as the default schema. Reruns upsert matching IGDB IDs. The all-entity command requests at most five records per entity, sequentially in games → genres → platforms → companies → involved_companies order, with separate archives and run metadata. Fetch limits apply per entity. Failure stops later entities; earlier completed loads remain committed. `--output-path` is allowed for a single entity and rejected with `all`. Repeat the bounded all-entity command to check upserts, then stop PostgreSQL and verify its service flags are all false. Task 3.6 executed that CLI twice successfully; [Testing](TESTING.md#task-36-verification) records exact validation and cleanup commands.
+The first command requests at most 500 games and validates authentication, API access, JSONL output, and PostgreSQL loading. The configured database user must be able to create the schema/table and insert/update rows. The output is `data/raw/raw_games_<timestamp>.jsonl` and `<POSTGRES_RAW_SCHEMA>.raw_games`, using `raw` as the default schema. Reruns upsert matching IGDB IDs. The all-entity command requests at most five records per entity, sequentially in games → genres → platforms → companies → involved_companies order, with separate archives and run metadata. Fetch limits apply per entity. Failure stops later entities; earlier completed loads remain committed. `--output-path` is allowed for a single entity and rejected with `all`. Repeat the bounded all-entity command to check upserts, then stop PostgreSQL and verify its service flags are all false. Task 3.6 executed that CLI twice successfully; [Testing](TESTING.md#task-36-verification) records exact validation and cleanup commands.
 
-Since task 4.5, these bounded smoke commands still load data but always leave `source_watermark_end` NULL. Normal uncapped CLI runs use per-entity persisted cutoffs for games/companies/involved companies: the first eligible run reads the whole endpoint, then later runs use a frozen overlap window. Genres/platforms always read unfiltered. This runtime checkpoint behavior has offline tests only; no live PostgreSQL or IGDB validation was performed for task 4.5. See the [watermark policy](../pipeline/WATERMARKS.md).
+Since task 4.5, these bounded smoke commands still load data but always leave `source_watermark_end` NULL. Normal uncapped CLI runs use per-entity persisted cutoffs for games/companies/involved companies: the first eligible run reads the whole endpoint, then later runs use a frozen overlap window. Genres/platforms always read unfiltered. Checkpoint behavior now also has repeatable real-PostgreSQL integration coverage with controlled source responses. The September 29 reassessment separately verified bounded live normal/refresh runs and backfill filters; uncapped live bootstrap remains unverified. See the [watermark policy](../pipeline/WATERMARKS.md).
 
 ## dbt
 
-The project and profile are both in `dbt/`. Validate the scaffold without connecting to PostgreSQL:
+The project and profile are both in `dbt/`. Parse the five source declarations and the `stg_games` / `stg_genres` / `stg_platforms` / `stg_companies` / `stg_involved_companies` models, then list them without connecting to PostgreSQL:
 
 ```bash
 dbt parse --project-dir dbt --profiles-dir dbt
+dbt ls --project-dir dbt --profiles-dir dbt --resource-type source
+dbt ls --project-dir dbt --profiles-dir dbt --resource-type model
 ```
 
-Warnings about unused staging/intermediate/marts configuration are expected because no models exist. Generated targets/logs are local artifacts.
+Warnings about unused intermediate/marts configuration are expected because those models do not exist. The model listing contains `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies`. Source and staging primary keys have declared tests, but parsing and listing do not execute them or build the views. Generated targets/logs are local artifacts. To keep them outside this repository, pass `--target-path /private/tmp/dbt-target --log-path /private/tmp/dbt-logs` to each dbt command.
 
 To validate database connectivity, export the `POSTGRES_*` values to your shell first. For a trusted, shell-compatible `.env` on macOS/Linux (quote values containing spaces or shell metacharacters):
 
@@ -147,7 +156,9 @@ dbt debug --project-dir dbt --profiles-dir dbt
 
 This shell step assigns the values from `.env`, including any already exported values. In PowerShell, set the corresponding `$env:POSTGRES_*` variables before running `dbt debug`. Connection checks require a reachable PostgreSQL database; they were not run during Phase 1.
 
-Once models exist, the build command will be `dbt build --project-dir dbt --profiles-dir dbt`. Until then it does not validate the intended analytics pipeline.
+Run `dbt build --project-dir dbt --profiles-dir dbt` after exporting the settings above. It has passed on the existing local configuration, creating `analytics.stg_games`, `analytics.stg_genres`, `analytics.stg_platforms`, `analytics.stg_companies`, and `analytics.stg_involved_companies` over their legacy `analytics` raw sources and passing all ten source tests and ten staging identifier tests. The five existing rows for each of games, genres, platforms, companies, and involved companies were also queried and compared with raw records, including timestamps and fetch times. A view build alone does not evaluate row values; use the integration checks for that contract. Task 5.8 required no new ingestion, schema migration, or `.env` change; PostgreSQL was restored to stopped/unregistered afterward. All five staging models exist; downstream layers remain absent. Strict relationship tests remain deferred for incomplete bounded samples. See [task 5.8 verification](TESTING.md#task-58-dbt-tests-verification) for deliberate failing-data tests, exact commands, preservation checks, and cleanup.
+
+Task 5.9 additionally documents all five views and 35 columns in `dbt/models/staging/schema.yml`. The verified build retains those descriptions in the manifest; coverage compares documentation with SQL projections and actual database columns. The existing-data build and full suites passed again with no ingestion or settings changes, and PostgreSQL was restored to stopped/unregistered. See [task 5.9 commands and results](TESTING.md#task-59-model-documentation-and-build-verification). Keep using external target/log paths for local validation.
 
 ## Target Docker workflow
 

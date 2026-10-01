@@ -1,6 +1,6 @@
 # Current State
 
-Last verified against the working repository on September 28, 2026 (task 4.7 offline full-refresh/backfill validation; Phases 2 and 3 remain complete).
+Last verified against the working repository on September 30, 2026 (task 5.9 and Phase 5 complete; PostgreSQL integration checks and local builds/row comparisons for `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` pass).
 
 This document describes what exists in code today. Planned components belong in `ARCHITECTURE.md` and `ROADMAP.md`.
 
@@ -10,7 +10,7 @@ This document describes what exists in code today. Planned components belong in 
 |---|---|---|
 | Repository scaffolding | Complete | `src/`, `tests/`, `dbt/`, `dags/`, `docker/`, `app/`, `data/` exist |
 | Local setup / repository baseline | Phase 1 verified | Fresh Python 3.11 install, offline unit tests, CLI help, and dbt scaffold parsing pass; previously tracked artifacts remain reported below |
-| Configuration | Implemented | Environment-backed `Settings`, `.env.example`, cached settings loader |
+| Configuration | Implemented | Environment-backed `Settings`, `.env.example`, cached settings loader; Python raw/metadata defaults to `raw`, dbt output defaults to `analytics` |
 | Logging | Implemented | Shared logger with configurable log level |
 | Twitch OAuth | Implemented | Client-credentials token request, in-memory token cache, expiration buffer |
 | IGDB client | Implemented | APIcalypse POST requests, headers, retries/backoff, 401 token refresh |
@@ -18,12 +18,12 @@ This document describes what exists in code today. Planned components belong in 
 | Local raw archive | Implemented | Separate timestamped JSONL archives for each CLI-selected entity; default games path retained |
 | PostgreSQL games load | Implemented | Connections, schema/table creation, and `ON CONFLICT` upsert into `raw_games` live in `src/storage/raw_games.py` |
 | Ingestion run metadata | Implemented | Shared runner records running/succeeded/failed runs for the supplied entity with UTC timestamps, counts, and safe failure summaries |
-| Python tests | Implemented for current modules | 410 passing offline tests cover explicit refresh/backfill, consecutive incremental runs, runtime checkpoint gates, overlap preparation, optional windows, persisted lookup, and existing entity/runner behavior |
+| Python tests | Implemented for current modules | 429 passing offline tests cover staging SQL/test/documentation contracts, dbt sources, and existing ingestion behavior; 51 opt-in PostgreSQL/dbt cases bring the enabled suite to 480 passes |
 | Additional IGDB entities | Genres, platforms, companies, and involved companies implemented and smoke verified | All use the shared runner with `raw_genres` / `raw_platforms` / `raw_companies` / `raw_involved_companies` |
-| Incremental extraction | Normal, full-refresh, and backfill CLI paths verified offline | Games/companies/involved companies look up per-entity progress for normal/refresh runs. Normal runs bootstrap or use frozen overlap windows; explicit refresh reads unfiltered and may publish a newer eligible cutoff. Explicit backfills filter all selected entities over a caller interval and never publish progress. Genres/platforms stay unfiltered with NULL bounds on normal/refresh runs. |
+| Incremental extraction | Offline and real-PostgreSQL integration checks pass; bounded live CLI modes verified | Games/companies/involved companies look up per-entity progress for normal/refresh runs. Normal runs bootstrap or use frozen overlap windows; explicit refresh reads unfiltered and may publish a newer eligible cutoff. Explicit backfills filter all selected entities over a caller interval and never publish progress. Genres/platforms stay unfiltered with NULL bounds on normal/refresh runs. |
 | Generalized ingestion framework | Phase 2 complete (tasks 2.1–2.6) | CLI selects one or all five entities through an explicit ordered callback mapping and reusable lifecycle runner; offline tests cover the composed path with real helpers and fake external boundaries |
-| dbt project | Scaffolded | Project/profile and layer directories exist; no models yet |
-| dbt sources/tests/docs | Not implemented | No source YAML or models yet |
+| dbt project | Five staging models built and queried | `analytics.stg_games`, `analytics.stg_genres`, `analytics.stg_platforms`, `analytics.stg_companies`, and `analytics.stg_involved_companies` exist locally; five existing rows per model were queried and compared with raw records |
+| dbt sources/tests/docs | All five models and 35 columns documented; ten source and ten staging identifier tests pass against PostgreSQL | Python/dbt share `POSTGRES_RAW_SCHEMA` → legacy `POSTGRES_SCHEMA` → `raw` precedence. Opt-in tests build/query all five views with explicit, legacy, and conflicting schema settings |
 | Docker | Not implemented | `docker/` is a placeholder |
 | Airflow | Not implemented | `dags/` is a placeholder |
 | Streamlit | Not implemented | `app/` is a placeholder |
@@ -32,7 +32,7 @@ This document describes what exists in code today. Planned components belong in 
 
 ## Existing ingestion flow
 
-Local PostgreSQL is managed on demand: `brew services run postgresql@17` via native `/opt/homebrew/bin/brew` starts it without login registration, and `services stop` ends the work session. A restart check preserved five genres and two run records. The server was left stopped and unregistered on September 26, 2026; its on-disk databases remain intact. See [Local development](engineering/LOCAL_DEVELOPMENT.md#local-postgresql-on-apple-silicon).
+Local PostgreSQL is managed on demand: `brew services run postgresql@17` via native `/opt/homebrew/bin/brew` starts it without login registration, and `services stop` ends the work session. A restart check preserved five genres and two run records. The server was left stopped and unregistered after September 30 verification; its on-disk databases remain intact. See [Local development](engineering/LOCAL_DEVELOPMENT.md#local-postgresql-on-apple-silicon).
 
 The current command-line flow is:
 
@@ -55,7 +55,7 @@ IGDBClient.query(entity.endpoint, APIcalypse query)
     ↓
 entity fetcher
     ├── timestamped raw_<entity> JSONL archive
-    └── PostgreSQL <POSTGRES_SCHEMA>.raw_<entity> upsert
+    └── PostgreSQL <POSTGRES_RAW_SCHEMA>.raw_<entity> upsert
     ↓
 commit guarded ingestion_runs success and eligible cutoff together (after raw context exits)
 ```
@@ -115,7 +115,7 @@ The current foundation already demonstrates several useful engineering practices
 
 The highest-value gaps are not UI or AI. They are the pieces that turn the working games proof-of-concept into an actual data platform:
 
-1. create dbt sources, staging models, relationships, marts, and tests;
+1. build dbt relationships, marts, and broader model tests;
 2. containerize PostgreSQL and pipeline dependencies;
 3. orchestrate the pipeline with Airflow;
 4. add a thin analytics application;
@@ -285,7 +285,7 @@ Only task 4.4 is newly complete; tasks 4.5–4.7 remain unchecked. Runtime incre
 
 Completed September 28, 2026 with 147 affected and 371 full offline tests passing on Python 3.11.0. Normal CLI runs for games, companies, and involved companies now look up their own greatest eligible end, capture one run-start cutoff, bootstrap unfiltered when no end exists, or apply the frozen overlap window across every page from offset zero. The running record stores the actual inclusive lower bound when filtered. After archive, acknowledged raw load, and successful raw context exit, the existing guarded terminal metadata update commits an eligible exclusive cutoff with success. Every supplied cap, custom/default-field override, arbitrary callback without trusted selection, invalid timestamp, or count mismatch withholds progress with a fixed safe warning while preserving returned payloads and acknowledged counts. Empty uncapped success can advance after the existing empty archive/raw DDL lifecycle. Genres/platforms remain unfiltered with both bounds NULL. All mode retains independent per-entity lifecycles and fail-fast order.
 
-The verification uses queued fake source responses and database mocks. It checks emitted SQL, parameters, prepared rows, counts, commit calls, and context ordering, not live PostgreSQL constraint enforcement, rollback, durability, ambiguous commit outcomes, or IGDB completeness. PostgreSQL remained stopped/unregistered; no live ingestion or database writes occurred. Existing offset drift, timestamp visibility, stale-response overwrite, and ambiguous acknowledgment limits remain. At that point tasks 4.6–4.7 were unchecked; see [verification](engineering/TESTING.md#task-45-runtime-checkpoint-verification).
+The original September 28 verification used queued fake source responses and database mocks. It checks emitted SQL, parameters, prepared rows, counts, commit calls, and context ordering, not live PostgreSQL constraint enforcement, rollback, durability, ambiguous commit outcomes, or IGDB completeness. PostgreSQL remained stopped/unregistered; no live ingestion or database writes occurred. Existing offset drift, timestamp visibility, stale-response overwrite, and ambiguous acknowledgment limits remain. At that point tasks 4.6–4.7 were unchecked; see [verification](engineering/TESTING.md#task-45-runtime-checkpoint-verification).
 
 ## Task 4.6 incremental behavior tests
 
@@ -296,6 +296,94 @@ Completed September 28, 2026 with 254 affected and 380 full offline tests passin
 Completed September 28, 2026 with 189 affected and 410 full offline tests passing on Python 3.11.0. The CLI now accepts `--full-refresh` or paired `--backfill-start A --backfill-end B` with exact whole-second UTC `Z` instants. Parsing rejects incompatible/malformed intervals before settings or external work. Full refresh ignores prior progress for extraction, reads unfiltered from offset zero, and applies the existing eligibility gates plus `U > W` before publishing a cutoff for incremental entities. Backfill filters every page for all selected entities, records `A`, and always leaves end NULL. Subsequent normal runs use the greatest earlier eligible end or bootstrap. Reference entities remain unfiltered with NULL bounds outside explicit backfill. Raw upserts never delete rows.
 
 Offline tests cover CLI rejection, query/metadata SQL and parameters, prepared payloads/counts/commit ordering, caps, timestamp and failure gates, reference entities, all mode, and reruns. They do not prove live PostgreSQL constraint enforcement, rollback, durability, ambiguous commit outcomes, IGDB filtering, or source completeness. PostgreSQL stayed stopped and unregistered; no live ingestion or database writes occurred. See [verification](engineering/TESTING.md#task-47-refresh-and-backfill-verification).
+
+## Task 5.1 schema naming
+
+The final defaults now separate `raw` for Python-owned source tables and `ingestion_runs` from `analytics` for future dbt-managed outputs. `POSTGRES_RAW_SCHEMA` selects the Python schema; `DBT_SCHEMA` selects the dbt profile output schema. Python falls back to legacy `POSTGRES_SCHEMA` only when the new variable is absent, so an explicitly configured `analytics` installation keeps reading its existing ingestion history. At task 5.1, no source or model had been created by dbt yet. Changing a default does not move old tables or watermark history; the [manual transition](engineering/LOCAL_DEVELOPMENT.md#schema-names-and-existing-analytics-installations) is required before an old installation adopts `raw`.
+
+Focused configuration/CLI/storage/metadata tests passed (103), the full offline suite passed (412), and dbt parsed with generated output under `/private/tmp` without a database connection. PostgreSQL remained stopped and unregistered; no live ingestion or data movement occurred. See [verification](engineering/TESTING.md#task-51-schema-naming-verification).
+
+## Task 5.2 dbt raw sources
+
+`dbt/models/sources.yml` now declares the five Python-owned entity tables under `igdb`, using `POSTGRES_RAW_SCHEMA` (default `raw`) independently of dbt's `DBT_SCHEMA` output. Table and column descriptions reflect the actual raw DDL; each `igdb_id` has declared `unique` and `not_null` tests because it is the raw primary/upsert key. The involved-company ID belongs to the relationship record, while its game/company references and roles remain in JSONB. `ingestion_runs` is not an analytics source. There is no source freshness threshold because no ingestion cadence is documented.
+
+Offline verification passed: 7 focused tests and 413 full-suite tests, dbt parsed five sources and ten key tests, and manifest checks resolved the source schema to both `raw` and `analytics` under corresponding `POSTGRES_RAW_SCHEMA` values. No dbt model, relation, or data migration was created; source tests still require a database to execute. The original source declaration required an explicit override for legacy installations; the September 29 correction adds the same `POSTGRES_SCHEMA` fallback used by Python. See [verification](engineering/TESTING.md#task-52-dbt-source-verification).
+
+## Task 5.3 games staging
+
+`dbt/models/staging/stg_games.sql` now selects only `source('igdb', 'raw_games')` at one row per game, exposing the raw key as `game_id`. It carries name/slug and fetch time, converts game first-release and source-update Unix seconds to `TIMESTAMPTZ`, casts ratings to `NUMERIC` and counts to `BIGINT`, and retains genre/platform/involved-company ID arrays as JSONB. Missing optional scalar values remain SQL NULL; empty arrays and zero counts are not replaced. See the [column contract](pipeline/DBT_TRANSFORMATIONS.md#stg_games-task-53).
+
+The focused suite passed 19 tests and the full offline suite passed 415. dbt parsed and discovered one model without connecting to PostgreSQL. At that point the model had not been built or queried against raw data. The September 29 follow-up below closes that execution gap; at that point no other staging or relationship models existed.
+
+## Tasks 4.5–5.3 reassessment fixes
+
+Verified September 29, 2026 on Python 3.11.0 / PostgreSQL 17.11. The existing implementation is retained. dbt source resolution now shares Python’s legacy fallback, so the existing exported `POSTGRES_SCHEMA=analytics` works without editing `.env`, moving tables, or resetting ingestion history. `DBT_SCHEMA` remains independent.
+
+Added `tests/integration/` with explicit `RUN_POSTGRES_INTEGRATION=1` opt-in, disposable schemas, cleanup on assertion failure, temporary dbt artifacts, and no live IGDB calls. Fifteen cases exercise the three incremental entities with real commits/rollback, overlap, caps, refresh/backfill, empty success, terminal failure/retry, and a simulated acknowledgment failure after a real terminal commit. Six dbt cases build all five populated sources and `stg_games` under explicit/legacy/precedence configurations, query every output column, and test invalid scalar reads. View creation does not evaluate row casts; the documentation now states this limitation correctly.
+
+The focused configuration/SQL suite passed 11 cases (21 integration cases skipped by default). The full default suite passed **419**, with **21 skipped**; the full opted-in suite passed **440**. A separate build with the actual local settings passed all ten source tests, created `analytics.stg_games`, and verified its five rows against existing raw payloads. Raw-table and run-history hashes were unchanged. Temporary test schemas were removed, and PostgreSQL was stopped/unregistered after verification. See [exact commands and limits](engineering/TESTING.md#tasks-45-through-53-reassessment-fixes).
+
+The preceding audit also ran two bounded live all-entity ingestions, backfills across all five endpoints, and a bounded full refresh in isolated schemas. No uncapped live bootstrap, source completeness guarantee, real network acknowledgment loss, or server-crash recovery was validated. At that point no later roadmap task was implemented; task 5.4 verification follows.
+
+## Task 5.4 genres staging
+
+`stg_genres` is a view selected directly from `igdb.raw_genres`, preserving one row per raw ID. It exposes `genre_id`, nullable raw `name`/`slug`, nullable Unix-seconds `source_updated_at` as `TIMESTAMPTZ`, and unchanged `fetched_at`. It follows the games conventions without joins, filtering, deduplication, defaults, or relationship expansion. See the [column contract](pipeline/DBT_TRANSFORMATIONS.md#stg_genres-task-54).
+
+Verification passed: **17 narrow offline tests**, **420 full offline tests with 27 skipped**, **12 focused dbt/PostgreSQL cases**, and **447 full enabled tests**. The integration fixture now expects both views, retains games checks, and validates genre types, grain, every value, missing/null/empty fields, zero/negative timestamps, a large ID, and invalid timestamp reads across all three schema configurations.
+
+The existing local configuration resolved raw and output schemas to `analytics`. A count first confirmed five stored genres; no live IGDB requests or additional ingestion were needed. `dbt build` created both views and passed ten source tests. All five genre rows (IDs 2, 4, 5, 7, 8) and five game rows were explicitly queried and compared with raw records. Before/after hashes for all five raw tables and ingestion history matched. Disposable schemas were removed; dbt artifacts went to `/private/tmp`, and PostgreSQL was restored to stopped/unregistered. `.env`, baseline edits, and tracked generated/private artifacts were preserved. See [exact commands and results](engineering/TESTING.md#task-54-genres-staging-verification).
+
+At that point only task 5.4 was newly complete, with task 5.5 (`stg_platforms`) next; tasks 5.8–5.9 remain open. Invalid non-null source timestamps still fail on view reads, consistent with games; the stored five-row sample does not establish full source coverage.
+
+## Task 5.5 platforms staging
+
+`stg_platforms` is a single-source view over `igdb.raw_platforms`, with one row per raw ID. It exposes `platform_id`, nullable raw `name`/`slug`, nullable Unix-seconds `source_updated_at` as `TIMESTAMPTZ`, and unchanged `fetched_at`. It follows the existing staging convention without joins, filters, deduplication, relationship expansion, or business transformations. See the [column contract](pipeline/DBT_TRANSFORMATIONS.md#stg_platforms-task-55).
+
+Verification passed: **18 narrow offline tests**, **421 full offline tests with 33 skipped**, **18 focused dbt/PostgreSQL cases**, and **454 full enabled tests**. Six added parameterized database cases verify platform types, grain, raw IDs, every output value, missing/null/empty optional fields, zero/negative timestamps, Unicode, a large ID, and invalid timestamp reads under all three schema configurations. Games and genres regression checks remain.
+
+The unchanged local configuration built all three staging views and passed ten source tests in `analytics`. A count first confirmed five existing platforms, so no ingestion was needed. All five platforms (IDs 3–7), five games, and five genres were queried and compared with raw records. All raw-table and ingestion-history hashes matched before/after. Disposable schemas were removed, dbt artifacts stayed outside the repository, and PostgreSQL was restored to stopped/unregistered. Existing edits, `.env`, and tracked generated artifacts were preserved. See [exact commands, sample values, and cleanup](engineering/TESTING.md#task-55-platforms-staging-verification).
+
+At that point only task 5.5 was newly complete; task 5.6 (`stg_companies`) was next. Tasks 5.8–5.9 remain open. The real sample has no missing platform values; synthetic database fixtures cover missing/null cases. Malformed non-null timestamps fail on view reads, and five stored rows do not establish full source coverage.
+
+## Task 5.6 companies staging
+
+`stg_companies` is a single-source view over `igdb.raw_companies`, preserving one row per raw ID. It exposes `company_id`, nullable raw `name`/`slug`, nullable Unix-seconds `source_updated_at` as `TIMESTAMPTZ`, and unchanged `fetched_at`. It uses the existing staging convention without joins, filters, deduplication, expansion, or business transformations. See the [column contract](pipeline/DBT_TRANSFORMATIONS.md#stg_companies-task-56).
+
+Verification passed: **19 narrow offline tests**, **422 full offline tests with 39 skipped**, **24 focused dbt/PostgreSQL cases**, and **461 full enabled tests**. Six added parameterized company cases query actual types, view materialization, every output value, raw IDs and grain, missing/null/empty fields, Unicode, zero/negative/modern timestamps, a large ID, and invalid timestamp reads. All existing staging regressions and explicit/legacy/precedence schema checks remain.
+
+Before the local build, a count confirmed five stored companies; no ingestion was needed. The unchanged local configuration built four views in `analytics` and passed ten source tests. All five companies (IDs 1–5), five games, five genres, and five platforms matched raw records, including timestamps and fetch times. All five raw-table and ingestion-history hashes matched before/after the build. Disposable schemas were removed, dbt artifacts stayed outside the repository, and PostgreSQL was restored to stopped/unregistered. Existing edits, `.env`, raw files, and tracked generated artifacts were preserved. See [exact commands, company values, and cleanup](engineering/TESTING.md#task-56-companies-staging-verification).
+
+At that point only task 5.6 was newly complete; task 5.7 (`stg_involved_companies`) was next. Tasks 5.8–5.9 remain open. Missing/null cases are verified with synthetic database fixtures; the stored company sample has no missing values. Invalid non-null timestamps fail when read, and five real rows do not establish full IGDB coverage.
+
+## Task 5.7 involved-companies staging
+
+`stg_involved_companies` is a single-source view over `igdb.raw_involved_companies` at one row per relationship record ID (`involved_company_id`). It exposes nullable BIGINT `game_id`/`company_id`, nullable BOOLEAN `developer`/`publisher`, nullable Unix-seconds `source_updated_at` as TIMESTAMPTZ, and unchanged `fetched_at`. Missing/JSON-null scalars remain SQL NULL and false roles remain false. Repeated game/company pairs and references absent from bounded raw samples are retained. See the [column contract](pipeline/DBT_TRANSFORMATIONS.md#stg_involved_companies-task-57).
+
+Verification passed: **20 narrow offline tests**, **423 full default tests with 45 skipped**, **30 focused dbt/PostgreSQL cases**, and **468 full enabled tests**. All earlier regressions remain. Six new parameterized database cases check actual types, view materialization, every value, relationship grain, missing/null fields, all four role combinations, repeated/unmatched pairs, large IDs, zero/negative/modern timestamps, and invalid scalar reads across the three schema settings.
+
+A pre-build count confirmed five existing involved-company records, so no ingestion was needed. The unchanged local configuration built all five views in `analytics` and passed ten source tests. Every field in relationship IDs 2, 6, 7, 8, and 9 matched raw records, as did all five rows in each earlier view. All raw-table and ingestion-history hashes matched before tests and after the local build. No disposable schemas remained. dbt artifacts stayed outside the repository, and PostgreSQL was restored to stopped/unregistered. Existing edits, `.env`, raw archives, and tracked generated artifacts were retained; nothing was committed. See [exact commands, comparisons, environment repair, and cleanup](engineering/TESTING.md#task-57-involved-companies-staging-verification).
+
+At that point only task 5.7 was newly complete; task 5.8 (dbt tests) was next. Task 5.9 remains open. Missing/null and both-true/both-false role cases use synthetic fixtures; the five stored relationships cover developer-only/publisher-only roles. Invalid non-null scalars fail on read, and a bounded sample does not establish complete references or source coverage.
+
+## Task 5.8 dbt tests
+
+Added ten `unique`/`not_null` tests for the five staging primary identifiers, alongside the existing ten source-key tests. Involved companies uses its own relationship record ID; references and game/company pairs need not be unique. Strict relationship checks remain deferred because independently bounded ingestion does not guarantee referenced entities, references may be absent/null, and games retain JSONB arrays without bridge models. See the [per-relationship policy](pipeline/DBT_TRANSFORMATIONS.md#staging-identifier-tests-task-58).
+
+Verification passed: **12 narrow offline tests**, **424 full default tests with 51 skipped**, **36 focused dbt/PostgreSQL tests**, and **475 full enabled tests**. One new offline contract test and six database cases cover duplicate/NULL model output, exact model-test failures with valid raw keys, and recovery after view restoration under all three schema settings. Existing scalar, reference/role, source-schema precedence, independent output-schema, and ingestion regressions remain.
+
+The local build created five views and passed **twenty dbt tests**. All five rows in every staging model matched the existing raw records; no ingestion was needed. Hashes of all five raw tables and 21 ingestion-run records matched before tests and after the build. Disposable schemas were removed and PostgreSQL was restored to stopped/unregistered. Existing edits, `.env`, raw archives, and tracked artifacts were preserved, with dbt artifacts outside the repository. See [exact commands and results](engineering/TESTING.md#task-58-dbt-tests-verification).
+
+At that point only task 5.8 was newly complete; task 5.9 (model/column documentation and build verification) was next. Identifier tests do not validate all scalar casts or establish source completeness.
+
+## Task 5.9 model documentation and build verification
+
+All five staging models and all 35 output columns now have descriptions in `dbt/models/staging/schema.yml`, based on the verified source/model contracts. They document lineage, grain, types, scalar and JSONB null distinctions, timestamp meanings, rating/count pass-through, reference caveats, and independent nullable roles. Existing SQL, identifier tests, relationship-test deferrals, schema precedence, and independent `DBT_SCHEMA` are unchanged.
+
+Verification passed: **17 narrow offline tests**, **429 full default tests with 51 skipped**, **36 focused dbt/PostgreSQL tests**, and **480 full enabled tests**. Five new offline cases check complete/nonempty documentation against SQL projections; existing database fixtures verify manifest descriptions against actual view columns under all three schema configurations.
+
+The existing-data build created five views and passed twenty dbt tests. All model/column descriptions survived parsing exactly, and every output value for five existing rows per view matched raw records. No ingestion was needed. All five raw-table hashes and the hash of 21 ingestion-run records matched before tests and after the build. Disposable schemas were removed, artifacts stayed outside the repository, and PostgreSQL was restored to stopped/unregistered. Existing edits, `.env`, raw archives, and tracked artifacts were preserved. See [exact commands, results, and cleanup](engineering/TESTING.md#task-59-model-documentation-and-build-verification).
+
+Only task 5.9 is newly complete, satisfying Phase 5's documented/tested staging build criterion. Phase 6 remains unimplemented. View builds and identifier tests still do not evaluate every scalar cast or establish full source/reference coverage; the verification queries stored values separately and retains the existing relationship-test deferrals.
 
 ## Known repository hygiene items
 

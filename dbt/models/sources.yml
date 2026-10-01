@@ -1,0 +1,77 @@
+version: 2
+
+sources:
+  - name: igdb
+    description: Python-loaded IGDB records preserved in PostgreSQL raw tables.
+    schema: "{{ env_var('POSTGRES_RAW_SCHEMA', env_var('POSTGRES_SCHEMA', 'raw')) }}"
+    tables:
+      - name: raw_games
+        description: One game per IGDB game ID; name and slug may be absent, while the complete source object is retained in payload.
+        columns:
+          - name: igdb_id
+            description: IGDB game ID from payload.id; primary key and raw upsert key.
+            data_tests: [unique, not_null]
+          - name: name
+            description: Optional game name from the source object.
+          - name: slug
+            description: Optional game slug from the source object.
+          - name: payload
+            description: Complete fetched IGDB game object as JSONB.
+          - name: fetched_at
+            description: Timestamp assigned by the Python loader for this fetch.
+
+      - name: raw_genres
+        description: One genre per IGDB genre ID; name and slug may be absent, while the complete source object is retained in payload.
+        columns:
+          - name: igdb_id
+            description: IGDB genre ID from payload.id; primary key and raw upsert key.
+            data_tests: [unique, not_null]
+          - name: name
+            description: Optional genre name from the source object.
+          - name: slug
+            description: Optional genre slug from the source object.
+          - name: payload
+            description: Complete fetched IGDB genre object as JSONB.
+          - name: fetched_at
+            description: Timestamp assigned by the Python loader for this fetch.
+
+      - name: raw_platforms
+        description: One platform per IGDB platform ID; name and slug may be absent, while the complete source object is retained in payload.
+        columns:
+          - name: igdb_id
+            description: IGDB platform ID from payload.id; primary key and raw upsert key.
+            data_tests: [unique, not_null]
+          - name: name
+            description: Optional platform name from the source object.
+          - name: slug
+            description: Optional platform slug from the source object.
+          - name: payload
+            description: Complete fetched IGDB platform object as JSONB.
+          - name: fetched_at
+            description: Timestamp assigned by the Python loader for this fetch.
+
+      - name: raw_companies
+        description: One company per IGDB company ID; name and slug may be absent, while the complete source object is retained in payload.
+        columns:
+          - name: igdb_id
+            description: IGDB company ID from payload.id; primary key and raw upsert key.
+            data_tests: [unique, not_null]
+          - name: name
+            description: Optional company name from the source object.
+          - name: slug
+            description: Optional company slug from the source object.
+          - name: payload
+            description: Complete fetched IGDB company object as JSONB.
+          - name: fetched_at
+            description: Timestamp assigned by the Python loader for this fetch.
+
+      - name: raw_involved_companies
+        description: One IGDB involved-company relationship record per relationship ID; game, company, and role fields remain in payload.
+        columns:
+          - name: igdb_id
+            description: IGDB involved-company record ID from payload.id; primary key and raw upsert key, not a company ID.
+            data_tests: [unique, not_null]
+          - name: payload
+            description: Complete fetched IGDB involved-company object as JSONB, including references and roles when present.
+          - name: fetched_at
+            description: Timestamp assigned by the Python loader for this fetch.

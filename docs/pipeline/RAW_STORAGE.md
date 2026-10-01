@@ -6,7 +6,7 @@ The raw PostgreSQL layer is the durable boundary between source ingestion and an
 
 ## Current state
 
-`src/storage/raw_games.py` owns PostgreSQL connection creation, raw-games DDL, and upserts. `run_ingestion.py` supplies its table/upsert helpers to `pipeline.ingest_entity()`, which imports the connection factory and coordinates connection contexts. The table remains `<POSTGRES_SCHEMA>.raw_games`, defaulting to `analytics.raw_games`. Its columns are:
+`src/storage/raw_games.py` owns PostgreSQL connection creation, raw-games DDL, and upserts. `run_ingestion.py` supplies its table/upsert helpers to `pipeline.ingest_entity()`, which imports the connection factory and coordinates connection contexts. The table is `<POSTGRES_RAW_SCHEMA>.raw_games`, defaulting to `raw.raw_games`. Its columns are:
 
 ```text
 igdb_id BIGINT PRIMARY KEY
@@ -36,7 +36,7 @@ Two bounded games runs verified all three arrays, source/archive/JSONB fidelity,
 
 ### Genres (task 3.1)
 
-`src/storage/raw_genres.py` provides `ensure_raw_genres_table(connection, schema_name)` and `upsert_raw_genres(connection, genres, schema_name, fetched_at)`. The destination is `<POSTGRES_SCHEMA>.raw_genres` (default `analytics.raw_genres`), with the same five-column shape shown above. It uses the `GENRES` contract's source `id` → raw `igdb_id` mapping. Only name/slug are extracted alongside the key; the entire fetched object, including `updated_at` when present, is stored in JSONB.
+`src/storage/raw_genres.py` provides `ensure_raw_genres_table(connection, schema_name)` and `upsert_raw_genres(connection, genres, schema_name, fetched_at)`. The destination is `<POSTGRES_RAW_SCHEMA>.raw_genres` (default `raw.raw_genres`), with the same five-column shape shown above. It uses the `GENRES` contract's source `id` → raw `igdb_id` mapping. Only name/slug are extracted alongside the key; the entire fetched object, including `updated_at` when present, is stored in JSONB.
 
 DDL commits separately. Non-empty upserts replace name, slug, payload, and `fetched_at` on primary-key conflict, then commit and return processed input-row count. Empty inputs open no cursor and make no helper commit. All rows are prepared before writes, so a missing ID fails without a partial upsert; name and slug are nullable. Identifiers use `psycopg.sql.Identifier` and values are parameterized. Database errors propagate for the runner's connection context to handle. These semantics match games, whose code and emitted SQL remain unchanged.
 
@@ -44,7 +44,7 @@ Direct composition with `pipeline.ingest_entity()` uses the existing connection 
 
 ### Platforms (task 3.2)
 
-`src/storage/raw_platforms.py` provides `ensure_raw_platforms_table(connection, schema_name)` and `upsert_raw_platforms(connection, platforms, schema_name, fetched_at)`. `<POSTGRES_SCHEMA>.raw_platforms` uses the same five-column raw shape and source `id` → `igdb_id` mapping via `PLATFORMS`. Name/slug are nullable; the complete fetched object, including `updated_at` if present, remains JSONB.
+`src/storage/raw_platforms.py` provides `ensure_raw_platforms_table(connection, schema_name)` and `upsert_raw_platforms(connection, platforms, schema_name, fetched_at)`. `<POSTGRES_RAW_SCHEMA>.raw_platforms` uses the same five-column raw shape and source `id` → `igdb_id` mapping via `PLATFORMS`. Name/slug are nullable; the complete fetched object, including `updated_at` if present, remains JSONB.
 
 As with genres, identifiers are quoted, values parameterized, all rows prepared before writes, DDL committed separately, and non-empty upserts committed after execution. Conflicts replace name/slug/payload/fetch time. Empty input returns zero without a cursor or helper commit; database errors propagate. The unchanged runner records `entity='platforms'` using separate metadata connections, a durable start, success after raw context exit, best-effort failure reporting, and NULL watermarks.
 
@@ -52,7 +52,7 @@ Two bounded live runs verified five distinct rows, source/archive/JSONB fidelity
 
 ### Companies (task 3.3)
 
-`src/storage/raw_companies.py` provides `ensure_raw_companies_table(connection, schema_name)` and `upsert_raw_companies(connection, companies, schema_name, fetched_at)`. `<POSTGRES_SCHEMA>.raw_companies` has the same five-column shape, using `COMPANIES` to map source `id` to raw `igdb_id`. Name/slug are nullable; the complete fetched object, including source update time when present, is retained in JSONB.
+`src/storage/raw_companies.py` provides `ensure_raw_companies_table(connection, schema_name)` and `upsert_raw_companies(connection, companies, schema_name, fetched_at)`. `<POSTGRES_RAW_SCHEMA>.raw_companies` has the same five-column shape, using `COMPANIES` to map source `id` to raw `igdb_id`. Name/slug are nullable; the complete fetched object, including source update time when present, is retained in JSONB.
 
 Identifiers are quoted and values parameterized. Rows are prepared before writes; missing IDs prevent any upsert. DDL and non-empty loads commit separately. Conflicts replace name, slug, payload, and fetch time; empty input returns zero without a cursor or helper commit. Errors propagate to the existing runner's context. The runner records `entity='companies'` with the unchanged durable start, success after raw context exit, best-effort failure reporting, and NULL watermarks.
 
@@ -60,7 +60,7 @@ Two bounded live runs verified source/archive/JSONB equality, repeated upserts, 
 
 ### Involved companies (task 3.4)
 
-`src/storage/raw_involved_companies.py` provides `ensure_raw_involved_companies_table()` and `upsert_raw_involved_companies()` with the established callback signatures. `<POSTGRES_SCHEMA>.raw_involved_companies` contains only:
+`src/storage/raw_involved_companies.py` provides `ensure_raw_involved_companies_table()` and `upsert_raw_involved_companies()` with the established callback signatures. `<POSTGRES_RAW_SCHEMA>.raw_involved_companies` contains only:
 
 ```text
 igdb_id BIGINT PRIMARY KEY
@@ -85,7 +85,9 @@ raw_involved_companies
 ingestion_runs
 ```
 
-The exact schema name should be finalized before dbt models are built. Prefer a semantically clear `raw` schema if the migration remains simple.
+The final Python-owned schema is `raw` by default; `POSTGRES_RAW_SCHEMA` can select another schema. The same setting controls all five raw tables and `ingestion_runs`. The legacy `POSTGRES_SCHEMA` setting is used only when the new variable is absent. Existing `analytics` data and run history are not moved by changing the default. See [schema transition](../engineering/LOCAL_DEVELOPMENT.md#schema-names-and-existing-analytics-installations).
+
+dbt declares only the five raw entity tables as `igdb` sources, using the same `POSTGRES_RAW_SCHEMA` → legacy `POSTGRES_SCHEMA` → `raw` precedence as Python. The declaration does not create or move raw tables; see [dbt sources](DBT_TRANSFORMATIONS.md#source-layer).
 
 ## Raw-table contract
 
@@ -122,7 +124,7 @@ The [task 4.4 tests](../engineering/TESTING.md#task-44-overlap-upsert-verificati
 
 ## Ingestion run metadata
 
-Implemented table: `<POSTGRES_SCHEMA>.ingestion_runs`, defaulting to `analytics.ingestion_runs`. It is created if absent; this task does not migrate an existing table with a different definition.
+Implemented table: `<POSTGRES_RAW_SCHEMA>.ingestion_runs`, defaulting to `raw.ingestion_runs`. It is created if absent; this configuration change does not migrate an existing table or its watermark history.
 
 ```text
 ingestion_runs
@@ -177,7 +179,7 @@ Run metadata uses separate connections and transactions:
 
 These boundaries deliberately do not make raw data and terminal metadata atomic. Connection loss around a commit can leave the database outcome uncertain; counts describe acknowledged operations, not reconciliation of ambiguous commits. If a success commit took effect but its acknowledgment was lost, the guarded failure update cannot overwrite that terminal success. An unavailable metadata database, process death, or `KeyboardInterrupt`/`SystemExit` can leave a `running` row. There is no automatic retry, stale-run recovery, or reconciliation through task 2.5. The JSONL archive is also outside PostgreSQL transactions and can remain after a load failure (or be partial after an archive failure).
 
-Unit tests verify helper commit calls, SQL preparation, transitions, and exception/context ordering with fakes. Bounded live genres, platforms, companies, and involved-companies smoke runs verified successful commits and duplicate-free repeated upserts. Failure rollback and ambiguous commit outcomes have not been integration-tested.
+Unit tests verify helper commit calls, SQL preparation, transitions, and exception/context ordering with fakes. Bounded live genres, platforms, companies, and involved-companies smoke runs verified successful commits and duplicate-free repeated upserts. The [PostgreSQL integration suite](../engineering/TESTING.md#postgresql-integration-tests) additionally verifies raw batch rollback, terminal SQL failure after a committed load, retry, and guarded failure reporting after a simulated acknowledgment error following a real success commit. Actual network-loss and server-crash outcomes remain untested.
 
 ### Accepted watermark design (task 4.1)
 

@@ -1,0 +1,190 @@
+version: 2
+
+# Strict reference-existence checks are deferred: bounded ingestion does not
+# guarantee referenced rows. See docs/pipeline/DBT_TRANSFORMATIONS.md, Tests.
+models:
+  - name: stg_games
+    description: >-
+      One row per IGDB game, keyed by the raw igdb_id as game_id. This view
+      projects raw_games without joins, filters, deduplication, or relationship
+      expansion. Optional scalar fields retain SQL NULL for missing keys or
+      JSON null; malformed non-null scalars fail when read. Reference arrays
+      retain their source values and do not guarantee loaded referenced rows.
+    columns:
+      - name: game_id
+        description: Non-null BIGINT IGDB game identifier from raw_games.igdb_id; unique row key.
+        data_tests: [unique, not_null]
+      - name: name
+        description: Nullable TEXT game name passed through from raw_games.name, including empty strings.
+      - name: slug
+        description: Nullable TEXT game slug passed through from raw_games.slug, including empty strings.
+      - name: first_release_at
+        description: >-
+          Nullable TIMESTAMPTZ instant converted from payload.first_release_date
+          Unix seconds. Game-level first release, not a platform or region release.
+          Missing keys and JSON null become SQL NULL; zero and negative epochs are preserved.
+      - name: source_updated_at
+        description: >-
+          Nullable TIMESTAMPTZ instant converted from payload.updated_at Unix seconds.
+          Missing keys and JSON null become SQL NULL; zero and negative epochs are
+          preserved. Source update time, not the load time or ingestion watermark.
+      - name: rating
+        description: >-
+          Nullable NUMERIC cast of payload.rating, preserved without rounding,
+          thresholds, or a zero default. Missing keys and JSON null become SQL NULL.
+      - name: rating_count
+        description: >-
+          Nullable BIGINT cast of payload.rating_count, the source count associated
+          with rating. Supplied zero is preserved; missing keys and JSON null become SQL NULL.
+      - name: total_rating
+        description: >-
+          Nullable NUMERIC cast of payload.total_rating, preserved without rounding,
+          thresholds, or a zero default. Missing keys and JSON null become SQL NULL.
+      - name: total_rating_count
+        description: >-
+          Nullable BIGINT cast of payload.total_rating_count, the source count
+          associated with total_rating. Supplied zero is preserved; missing keys
+          and JSON null become SQL NULL.
+      - name: genre_ids
+        description: >-
+          JSONB genre ID array from payload.genres, referencing stg_genres.genre_id.
+          Order and empty arrays are preserved; an absent key is SQL NULL and
+          explicit JSON null stays JSONB null. Members are not validated or expanded.
+          Relationship tests are deferred because bounded loads may omit referenced genres.
+      - name: platform_ids
+        description: >-
+          JSONB platform ID array from payload.platforms, referencing stg_platforms.platform_id.
+          Order and empty arrays are preserved; an absent key is SQL NULL and
+          explicit JSON null stays JSONB null. Members are not validated or expanded.
+          Relationship tests are deferred because bounded loads may omit referenced platforms.
+      - name: involved_company_ids
+        description: >-
+          JSONB relationship record ID array from payload.involved_companies,
+          referencing stg_involved_companies.involved_company_id, not company IDs.
+          Order and empty arrays are preserved; an absent key is SQL NULL and
+          explicit JSON null stays JSONB null. Members are not validated or expanded.
+          Relationship tests are deferred because bounded loads may omit referenced records.
+      - name: fetched_at
+        description: >-
+          Non-null TIMESTAMPTZ loader timestamp passed through from raw_games.fetched_at
+          for this stored version; not the source update time or ingestion watermark.
+
+  - name: stg_genres
+    description: >-
+      One row per IGDB genre, keyed by the raw igdb_id as genre_id. This view
+      projects raw_genres without joins, filters, deduplication, or relationship
+      expansion. Nullable raw values remain unchanged; malformed non-null
+      source timestamps fail when read. Bounded ingestion need not load every genre.
+    columns:
+      - name: genre_id
+        description: Non-null BIGINT IGDB genre identifier from raw_genres.igdb_id; unique row key.
+        data_tests: [unique, not_null]
+      - name: name
+        description: Nullable TEXT genre name passed through from raw_genres.name, including empty strings.
+      - name: slug
+        description: Nullable TEXT genre slug passed through from raw_genres.slug, including empty strings.
+      - name: source_updated_at
+        description: >-
+          Nullable TIMESTAMPTZ instant converted from payload.updated_at Unix seconds.
+          Missing keys and JSON null become SQL NULL; zero and negative epochs are
+          preserved. Source update time, not the load time or ingestion watermark.
+      - name: fetched_at
+        description: >-
+          Non-null TIMESTAMPTZ loader timestamp passed through from raw_genres.fetched_at
+          for this stored version; not the source update time or ingestion watermark.
+
+  - name: stg_platforms
+    description: >-
+      One row per IGDB platform, keyed by the raw igdb_id as platform_id. This view
+      projects raw_platforms without joins, filters, deduplication, or relationship
+      expansion. Nullable raw values remain unchanged; malformed non-null
+      source timestamps fail when read. Bounded ingestion need not load every platform.
+    columns:
+      - name: platform_id
+        description: Non-null BIGINT IGDB platform identifier from raw_platforms.igdb_id; unique row key.
+        data_tests: [unique, not_null]
+      - name: name
+        description: Nullable TEXT platform name passed through from raw_platforms.name, including empty strings.
+      - name: slug
+        description: Nullable TEXT platform slug passed through from raw_platforms.slug, including empty strings.
+      - name: source_updated_at
+        description: >-
+          Nullable TIMESTAMPTZ instant converted from payload.updated_at Unix seconds.
+          Missing keys and JSON null become SQL NULL; zero and negative epochs are
+          preserved. Source update time, not the load time or ingestion watermark.
+      - name: fetched_at
+        description: >-
+          Non-null TIMESTAMPTZ loader timestamp passed through from raw_platforms.fetched_at
+          for this stored version; not the source update time or ingestion watermark.
+
+  - name: stg_companies
+    description: >-
+      One row per IGDB company, keyed by the raw igdb_id as company_id. This view
+      projects raw_companies without joins, filters, deduplication, or relationship
+      expansion. Nullable raw values remain unchanged; malformed non-null
+      source timestamps fail when read. Bounded ingestion need not load every company.
+    columns:
+      - name: company_id
+        description: Non-null BIGINT IGDB company identifier from raw_companies.igdb_id; unique row key.
+        data_tests: [unique, not_null]
+      - name: name
+        description: Nullable TEXT company name passed through from raw_companies.name, including empty strings.
+      - name: slug
+        description: Nullable TEXT company slug passed through from raw_companies.slug, including empty strings.
+      - name: source_updated_at
+        description: >-
+          Nullable TIMESTAMPTZ instant converted from payload.updated_at Unix seconds.
+          Missing keys and JSON null become SQL NULL; zero and negative epochs are
+          preserved. Source update time, not the load time or ingestion watermark.
+      - name: fetched_at
+        description: >-
+          Non-null TIMESTAMPTZ loader timestamp passed through from raw_companies.fetched_at
+          for this stored version; not the source update time or ingestion watermark.
+
+  - name: stg_involved_companies
+    description: >-
+      One row per IGDB involved-company relationship record, keyed by raw igdb_id
+      as involved_company_id, not by game, company, or their pair. Distinct records
+      sharing a game/company pair remain distinct. This view projects
+      raw_involved_companies without joins, filters, deduplication, or expansion.
+      Optional scalars retain SQL NULL for missing keys or JSON null; malformed
+      non-null scalars fail when read. Independent bounded ingestion does not
+      guarantee referenced games or companies, so relationship tests are deferred.
+    columns:
+      - name: involved_company_id
+        description: >-
+          Non-null BIGINT relationship record identifier from raw_involved_companies.igdb_id;
+          unique row key, not a game ID or company ID.
+        data_tests: [unique, not_null]
+      - name: game_id
+        description: >-
+          Nullable BIGINT cast of payload.game, referencing stg_games.game_id.
+          Missing keys and JSON null become SQL NULL; zero is preserved. Repeated
+          and unmatched references are valid. Relationship tests are deferred
+          because independently bounded game loads may omit referenced rows.
+      - name: company_id
+        description: >-
+          Nullable BIGINT cast of payload.company, referencing stg_companies.company_id.
+          Missing keys and JSON null become SQL NULL; zero is preserved. Repeated
+          and unmatched references are valid. Relationship tests are deferred
+          because independently bounded company loads may omit referenced rows.
+      - name: developer
+        description: >-
+          Nullable BOOLEAN cast of payload.developer. Missing keys and JSON null
+          become SQL NULL (unknown), with no inferred default; false stays false.
+          Independent of publisher: both roles may be true, false, or unknown.
+      - name: publisher
+        description: >-
+          Nullable BOOLEAN cast of payload.publisher. Missing keys and JSON null
+          become SQL NULL (unknown), with no inferred default; false stays false.
+          Independent of developer: both roles may be true, false, or unknown.
+      - name: source_updated_at
+        description: >-
+          Nullable TIMESTAMPTZ instant converted from payload.updated_at Unix seconds.
+          Missing keys and JSON null become SQL NULL; zero and negative epochs are
+          preserved. Source update time, not the load time or ingestion watermark.
+      - name: fetched_at
+        description: >-
+          Non-null TIMESTAMPTZ loader timestamp passed through from
+          raw_involved_companies.fetched_at for this stored version;
+          not the source update time or ingestion watermark.

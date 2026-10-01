@@ -218,13 +218,12 @@ Each entity invocation gets a UUID and transitions from `running` to `succeeded`
 
 ## Schemas
 
-Prefer separate PostgreSQL schemas for responsibilities when practical:
+The configured schema boundary is:
 
-- `raw` — Python-loaded source tables
-- `analytics_staging` / dbt-managed development schema conventions
-- dbt-generated intermediate/mart relations according to project configuration
+- `raw` by default — Python-owned `raw_<entity>` tables and `ingestion_runs`, selected by `POSTGRES_RAW_SCHEMA`;
+- `analytics` by default — dbt-managed model outputs, selected independently by `DBT_SCHEMA` in the dbt profile.
 
-The current code uses a single configurable `analytics` schema. Schema separation should be introduced deliberately during the raw/dbt milestone rather than changed casually.
+Five dbt `igdb` sources and Python resolve their raw schema identically: `POSTGRES_RAW_SCHEMA`, then legacy `POSTGRES_SCHEMA`, then `raw`. This allows an existing `analytics` raw installation to retain its data and watermark lookup until an explicit move. `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` are views in independent `DBT_SCHEMA`; their builds, source tests, and row values have been verified against PostgreSQL. All five preserve one row per raw entity ID; involved companies uses the relationship record ID and exposes nullable game/company references and independent developer/publisher flags. Configuration and source declarations do not migrate tables or run history; see [local development](engineering/LOCAL_DEVELOPMENT.md#schema-names-and-existing-analytics-installations).
 
 ## Reliability principles
 

@@ -29,7 +29,7 @@ class Settings:
     postgres_db: str = "gaming_analytics"
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
-    postgres_schema: str = "analytics"
+    postgres_schema: str = "raw"
     log_level: str = "INFO"
 
     @classmethod
@@ -44,7 +44,10 @@ class Settings:
             postgres_db=os.getenv("POSTGRES_DB", "gaming_analytics"),
             postgres_user=os.getenv("POSTGRES_USER", "postgres"),
             postgres_password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-            postgres_schema=os.getenv("POSTGRES_SCHEMA", "analytics"),
+            # Keep old .env files on their existing raw/metadata schema.
+            postgres_schema=os.getenv(
+                "POSTGRES_RAW_SCHEMA", os.getenv("POSTGRES_SCHEMA", "raw")
+            ),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 

@@ -4,6 +4,31 @@
 
 Tests should protect pipeline behavior at the layer where failures are most meaningful, without requiring every test run to contact external services.
 
+## PostgreSQL integration tests
+
+Run the default suite without external services:
+
+```bash
+python -m pytest -q
+```
+
+Database checks under `tests/integration/` skip unless explicitly enabled. With PostgreSQL running and the Python 3.11 requirements installed:
+
+```bash
+RUN_POSTGRES_INTEGRATION=1 python -m pytest -q tests/integration
+# Full suite including database checks:
+RUN_POSTGRES_INTEGRATION=1 python -m pytest -q
+```
+
+In PowerShell, set `$env:RUN_POSTGRES_INTEGRATION = "1"` before the command. Connection settings come from the same `.env`/exported `POSTGRES_*` variables as ingestion. The configured login needs permission to create schemas, tables, views, and trigger functions in the selected database. An opted-in connection failure fails the suite; it does not silently skip.
+
+Each test creates unique `test_dp_<uuid>_raw` / `_dbt` schemas and drops only those schemas in fixture cleanup, including on assertion failures. Hard process termination can interrupt cleanup; there is no blanket prefix-based deletion. Existing configured raw/output schemas are not used for fixture data. JSONL and dbt targets/logs go to pytest temporary directories. No extra dependencies are required.
+
+- `test_ingestion_postgres.py`: actual raw/metadata transactions for games, companies, and involved companies; bootstrap, overlap, duplicate-safe updates, caps, backfill, full refresh, empty success, raw SQL rollback, terminal SQL failure after committed raw data, retry, and guarded failure after a simulated lost acknowledgment. Source pages and the run clock are controlled; the database is real, with fresh connections checking committed state.
+- `test_dbt_postgres.py`: five synthetic rows per entity source and six involved-company records; actual dbt builds of `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` plus ten source and ten staging identifier tests under explicit, legacy, and conflicting source-schema settings; PostgreSQL column types, view materialization, and every staging output value; missing/null/empty/zero/negative-epoch/large-ID/large-count/decimal/array cases; genre/platform/company/relationship grain and raw IDs; repeated and unmatched game/company pairs; all four developer/publisher combinations and nullable roles; and invalid scalar reads. Six task 5.8 cases deliberately break each disposable staging view with duplicate/NULL identifiers, require five specific model-test failures while source tests pass, then restore the views and require all twenty tests to pass. Missing references in all three games arrays and nullable/repeated/unmatched involved-company references remain valid. Task 5.9 also requires nonempty model/column descriptions in the manifest covering every actual view column.
+
+These tests never call IGDB. HTTP requests in the test process are rejected, and dbt usage reporting is disabled in subprocesses. Live API smoke checks remain separate. The suite does not prove source completeness, real network acknowledgment loss, server-crash durability, or production-wide data quality. `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` are views: a successful `dbt build` does not evaluate their casts for every raw row. The integration tests explicitly query their output using known fixtures; the dbt key tests inspect raw and staging identifiers, not all scalar casts.
+
 ## Current Python unit tests
 
 The repository currently tests:
@@ -1451,6 +1476,416 @@ PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m p
 
 The final affected suite passed **189 tests** and the full offline suite passed **410 tests**. Bytecode and pytest cache writes were disabled. Fake clients and cursors assert emitted SQL, bound parameters, prepared rows, counts, commit calls, and context ordering. They do not establish live PostgreSQL constraint enforcement, rollback, durability, ambiguous commit outcomes, actual IGDB filtering, or source completeness. PostgreSQL remained stopped and unregistered; no live ingestion or database writes occurred.
 
+## Task 5.1 schema naming verification
+
+Completed September 28, 2026 on Python 3.11.0. The coverage audit found existing fake-connection tests for SQL schema qualification and CLI routing, plus only general settings tests. New settings cases cover the `raw` default, explicit `POSTGRES_RAW_SCHEMA` precedence, and `POSTGRES_SCHEMA=analytics` fallback; the CLI test now asserts default schema routing. Storage SQL and ingestion lifecycle code were unchanged.
+
+Exact Python and dbt commands from the repository root:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_config.py tests/test_run_ingestion.py tests/test_raw_games.py tests/test_ingestion_runs.py
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=raw /private/tmp/data-platform-phase1-venv/bin/dbt parse --project-dir dbt --profiles-dir dbt --no-partial-parse --target-path /private/tmp/data-platform-task51-VyAlFZ/dbt-target --log-path /private/tmp/data-platform-task51-VyAlFZ/dbt-logs
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task51-VyAlFZ/verify_docs.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m src.ingestion.run_ingestion --help
+git diff --check
+```
+
+The pre-change focused suite passed **101**, the final focused suite **103**, and the full offline suite **412**. dbt parse passed without connecting to PostgreSQL; its three unused layer-configuration warnings are expected while no models exist. Bytecode and pytest cache writes were disabled, and dbt target/log output was directed outside the repository. Documentation links/examples and the final diff were checked separately. No live connection or migration was attempted. An existing `analytics` installation must keep its legacy raw setting or deliberately move all raw and metadata tables before selecting `raw`.
+
+## Task 5.2 dbt source verification
+
+Completed September 28, 2026 on Python 3.11.0. The coverage audit found entity contracts and fake-connection DDL/upsert tests for all five raw tables, but no dbt source declaration or source-contract test. A new offline test checks the YAML against entity table/key names, raw column shapes, key tests, the schema expression, and absence of unsupported freshness settings or extra sources. The pre-change raw/entity/config focus passed **56** tests; the new source/entity focus passed **7** tests; the full offline suite passed **413**.
+
+Exact commands from the repository root (all dbt generated target/log paths are under `/private/tmp`):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_entities.py tests/test_raw_games.py tests/test_raw_genres.py tests/test_raw_platforms.py tests/test_raw_companies.py tests/test_raw_involved_companies.py tests/test_config.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_sources.py tests/test_entities.py
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=raw /private/tmp/data-platform-phase1-venv/bin/dbt parse --project-dir dbt --profiles-dir dbt --no-partial-parse --target-path /private/tmp/data-platform-task52-11b3Vz/raw-target --log-path /private/tmp/data-platform-task52-11b3Vz/raw-logs
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=raw /private/tmp/data-platform-phase1-venv/bin/dbt ls --project-dir dbt --profiles-dir dbt --no-partial-parse --resource-type source --output name --target-path /private/tmp/data-platform-task52-11b3Vz/raw-list-target --log-path /private/tmp/data-platform-task52-11b3Vz/raw-list-logs
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=analytics /private/tmp/data-platform-phase1-venv/bin/dbt parse --project-dir dbt --profiles-dir dbt --no-partial-parse --target-path /private/tmp/data-platform-task52-11b3Vz/analytics-target --log-path /private/tmp/data-platform-task52-11b3Vz/analytics-logs
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task52-11b3Vz/verify_manifest.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task52-11b3Vz/verify_docs.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task52-11b3Vz/verify_snapshot.py
+git diff --check
+```
+
+The parsed manifests contained exactly five `igdb` sources and ten generic key tests in each schema configuration; each test depends on one source. `dbt ls` discovered all five tables. The docs check passed **125 local links** and the schema examples. The three unused model-directory warnings are expected while models do not exist. Bytecode/pytest caches were disabled; dbt artifacts were directed outside the repository, and before/after file snapshots showed no changes to existing unrelated or tracked generated files. This was parse/discovery validation only: PostgreSQL stayed stopped/unregistered, so the dbt tests did not execute against data, and source declarations did not move existing `analytics` tables or ingestion history.
+
+## Task 5.3 games staging verification
+
+Completed September 28, 2026 on Python 3.11.0. The audit found raw-games DDL/upsert and source-contract tests, plus the 12-field games extraction contract, but no staging model or staging checks. The new focused checks assert the one-source/one-row SQL shape, typed timestamps and ratings/counts, JSONB reference arrays, and absence of defaults, joins, or expansion. They inspect SQL offline; they do not execute it on PostgreSQL.
+
+Exact commands from the repository root:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_sources.py tests/test_entities.py tests/test_raw_games.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_stg_games.py tests/test_dbt_sources.py tests/test_entities.py tests/test_raw_games.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=raw /private/tmp/data-platform-phase1-venv/bin/dbt parse --project-dir dbt --profiles-dir dbt --no-partial-parse --target-path /private/tmp/data-platform-task53-U1CbNi/parse-target --log-path /private/tmp/data-platform-task53-U1CbNi/parse-logs
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=raw /private/tmp/data-platform-phase1-venv/bin/dbt ls --project-dir dbt --profiles-dir dbt --no-partial-parse --resource-type model --output name --target-path /private/tmp/data-platform-task53-U1CbNi/list-target --log-path /private/tmp/data-platform-task53-U1CbNi/list-logs
+PYTHONDONTWRITEBYTECODE=1 DBT_SCHEMA=analytics POSTGRES_RAW_SCHEMA=analytics /private/tmp/data-platform-phase1-venv/bin/dbt parse --project-dir dbt --profiles-dir dbt --no-partial-parse --target-path /private/tmp/data-platform-task53-U1CbNi/legacy-target --log-path /private/tmp/data-platform-task53-U1CbNi/legacy-logs
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -c "import json; p='/private/tmp/data-platform-task53-U1CbNi/parse-target/manifest.json'; m=json.load(open(p)); n=[v for v in m['nodes'].values() if v['resource_type']=='model']; assert len(n)==1; v=n[0]; assert v['name']=='stg_games'; assert v['config']['materialized']=='view'; assert v['schema']=='analytics'; assert v['depends_on']['nodes']==['source.data_platform.igdb.raw_games']; assert len(m['sources'])==5; print('manifest: one analytics view, raw_games dependency, five sources')"
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task52-11b3Vz/verify_docs.py
+git diff --check
+```
+
+The baseline focus passed **17**, the new focus **19**, and the full offline suite **415** tests. dbt parsed successfully with `raw` and legacy `analytics` source schemas and discovered only `stg_games`; the manifest records one `analytics` view depending on `igdb.raw_games` and five sources. The docs check passed **128 local links** and the schema examples; `git diff --check` passed. The two files already untracked at task start, `dbt/models/sources.yml` and `tests/test_dbt_sources.py`, retained their before-task SHA-256 hashes. The two unused intermediate/marts configuration warnings are expected. Generated dbt files went to `/private/tmp`; bytecode and pytest caches were disabled. This verification establishes parser/discovery and static SQL contracts only: the view, casts, source tests, and row values have not been exercised against PostgreSQL. PostgreSQL remained stopped and unregistered.
+
+## Task 5.4 genres staging verification
+
+Verified September 29, 2026 (local time), using the existing Python 3.11.0 / PostgreSQL 17.11 / dbt Core 1.12.5 / dbt-postgres 1.11.0 environment. Only task 5.4 was implemented. The baseline had uncommitted edits, including `tests/integration/test_dbt_postgres.py`; its before-task copy and repository file hashes were recorded under `/private/tmp/data-platform-task54` to distinguish this change. No dependencies or ingestion modules changed.
+
+Exact verification commands from the repository root:
+
+```bash
+# Narrow offline checks: 17 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_stg_genres.py tests/test_dbt_stg_games.py tests/test_dbt_sources.py tests/test_raw_genres.py
+# Initial state: Running/Loaded/Schedulable all false.
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Full default suite: 420 passed, 27 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Readiness was retried successfully before database tests.
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Narrow real-database checks: 12 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full enabled suite: 447 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing local data build and explicit comparisons: passed.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task54/verify_existing_dbt.py
+# Restore and inspect service state.
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+git diff --check
+```
+
+The first readiness probe reported no response; the retry reported accepting connections before database work. All tests passed on their first runs. Final service flags were all false and final readiness returned exit **2**, `no response`, as expected for the restored stopped service. Login registration was never enabled.
+
+The integration fixture builds two views and passes ten source tests under each of explicit `POSTGRES_RAW_SCHEMA`, legacy `POSTGRES_SCHEMA`, and explicit-over-legacy settings, with independent disposable output schemas. Six added parameterized genre cases query actual values/types/grain and invalid timestamp reads; the six existing games cases remain. Genre fixtures cover absent optional keys, explicit JSON null and nullable names/slugs, empty strings, Unicode, epoch zero, negative seconds, a modern timestamp, and a BIGINT ID beyond 32 bits. Exact expected tuples include `fetched_at`. The default suite skips all 27 database cases and remains independent of PostgreSQL and live HTTP.
+
+The temporary local verification harness loaded existing `.env` through the settings module without schema overrides or edits. Before building, `count(*)` confirmed **five** existing raw genres, so **no live-source requests or bounded ingestion were needed**. Its dbt subprocess executed this command using that loaded environment and `DBT_SEND_ANONYMOUS_USAGE_STATS=false`:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task54/existing-dbt/target --log-path /private/tmp/data-platform-task54/existing-dbt/logs
+```
+
+Result: **2 views built, 10 source tests passed**, raw schema `analytics`, output schema `analytics`. Only the existing unused intermediate/marts configuration warnings appeared. The harness queried every output column of all five genres and games, checked one row per raw ID, and compared names/slugs, converted timestamps, fetched times, and games numbers/arrays with raw records. Actual genre types were `BIGINT`, `TEXT`, `TEXT`, `TIMESTAMPTZ`, `TIMESTAMPTZ` in the documented order. The five real genre results were:
+
+| genre_id | name | slug | source_updated_at (UTC) |
+|---|---|---|---|
+| 2 | Point-and-click | point-and-click | 2011-12-08 22:08:06 |
+| 4 | Fighting | fighting | 2011-12-07 20:20:15 |
+| 5 | Shooter | shooter | 2011-12-07 20:20:15 |
+| 7 | Music | music | 2011-12-07 20:20:15 |
+| 8 | Platform | platform | 2011-12-07 20:20:15 |
+
+All five retained raw `fetched_at = 2026-09-27 02:57:10.632774+00:00`. Existing game IDs **1–5** also matched their raw values. Before/after hashes of all five raw tables and `ingestion_runs` matched; no `test_dp_%` schemas remained. Full sampled values/types are in the temporary `existing-dbt/verification.json` artifact. Both local views remain available when PostgreSQL restarts. Temporary dbt artifacts stayed outside the repository; existing `.env`, unmodified baseline files, and tracked generated/private artifacts were retained.
+
+Final review passed `git diff --check` and checked 74 local documentation links and anchors in the six modified documentation files. Before-task hashes confirmed that all 115 other baseline files, including `.env` and tracked generated artifacts, were unchanged. A task-only patch is retained at `/private/tmp/data-platform-task54/task54-only.diff` for review alongside the preexisting uncommitted work.
+
+The real stored sample has no missing optional genre values; those cases are verified using synthetic PostgreSQL fixtures. Successful view creation alone still does not validate row casts, and malformed non-null timestamps fail on read by design. This bounded stored sample establishes no full IGDB coverage. Broader dbt model tests/documentation under tasks 5.8–5.9 remain open.
+
+## Task 5.5 platforms staging verification
+
+Verified September 29, 2026 (local time), using Python 3.11.0 / PostgreSQL 17.11 / dbt Core 1.12.5 / dbt-postgres 1.11.0. Only task 5.5 was implemented. Before-task copies and hashes of 124 existing files were captured under `/private/tmp/data-platform-task55`; `.env` was hashed without copying its contents. Existing uncommitted work, including the integration suite, was retained. No dependencies or ingestion modules changed.
+
+Exact verification commands from the repository root, in execution order:
+
+```bash
+# Initial service state: Running/Loaded/Schedulable all false.
+/opt/homebrew/bin/brew services info postgresql@17
+# Narrow offline suite: 18 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_stg_platforms.py tests/test_dbt_stg_genres.py tests/test_dbt_stg_games.py tests/test_dbt_sources.py tests/test_raw_platforms.py
+# Full default suite: 421 passed, 33 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+/opt/homebrew/bin/brew services run postgresql@17
+# Initial sandboxed readiness loop could not reach the service.
+for attempt in {1..30}; do
+  /opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432 && break
+  sleep 1
+done
+# Outside the network sandbox: accepting connections, before database tests.
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Narrow dbt/PostgreSQL suite: 18 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full enabled suite: 454 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing local build, row comparisons, raw/history preservation: passed.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task55/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+git diff --check
+```
+
+All tests passed on their first runs. The database checks ran outside the network sandbox after readiness succeeded. Final service inspection showed `Running: false`, `Loaded: false`, `Schedulable: false`; final readiness returned exit **2**, `no response`, as expected. PostgreSQL was started with `services run`, without login registration, and stopped after verification.
+
+The integration fixture now expects exactly three staging views plus ten passing source tests, with explicit, legacy, and explicit-over-legacy source schema settings and independent disposable output schemas. Six new parameterized platform cases query actual PostgreSQL types, view materialization, every output value, raw IDs, and one-row-per-ID grain, and verify invalid timestamp reads fail. Fixtures include missing keys, explicit JSON null, nullable name/slug, empty strings, Unicode, epoch zero, negative Unix seconds, a modern timestamp, and a BIGINT ID beyond 32 bits. The twelve existing games/genres cases remain. Default tests skip all 33 database cases and require no live HTTP or PostgreSQL.
+
+The local verification harness loaded existing `.env` through the settings module, without source/output schema overrides. Before building, `count(*)` confirmed **five existing platforms**. No bounded ingestion or live-source request was needed. Its dbt subprocess used `DBT_SEND_ANONYMOUS_USAGE_STATS=false` and ran:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task55/existing-dbt/target --log-path /private/tmp/data-platform-task55/existing-dbt/logs
+```
+
+Result: **3 views built, 10 source tests passed**, raw schema `analytics`, output schema `analytics`. Only the expected unused intermediate/marts configuration warnings appeared. Platform output types were `BIGINT`, `TEXT`, `TEXT`, `TIMESTAMPTZ`, `TIMESTAMPTZ` in the documented order. All five platform rows were queried and compared with raw IDs, names/slugs, payload update times, and fetched times:
+
+| platform_id | name | slug | source_updated_at (UTC) |
+|---|---|---|---|
+| 3 | Linux | linux | 2024-06-10 13:48:09 |
+| 4 | Nintendo 64 | n64 | 2024-06-10 13:48:09 |
+| 5 | Wii | wii | 2024-06-10 13:48:09 |
+| 6 | PC (Microsoft Windows) | win | 2024-06-10 13:48:09 |
+| 7 | PlayStation | ps | 2024-06-10 13:48:09 |
+
+All five retained raw `fetched_at = 2026-09-27 02:57:11.235555+00:00`. The five games and five genres also matched every output value against raw records. Hashes of all five raw tables and `ingestion_runs` were unchanged across the local build. No `test_dp_%` schemas remained after integration cleanup. Detailed results are retained at `/private/tmp/data-platform-task55/existing-dbt/verification.json`; the harness and task-only diff are in the same temporary task directory. All three views remain available when PostgreSQL restarts. dbt targets/logs stayed outside the repository; `.env` and existing generated/private artifacts were preserved.
+
+The real sample contains no missing platform values; synthetic PostgreSQL fixtures verify missing/null behavior. View creation and source-key tests alone do not evaluate every cast. Malformed non-null timestamps still fail on read by design, and five stored rows do not establish full IGDB coverage. Tasks 5.6 onward, including broader model tests and YAML documentation under 5.8–5.9, remain open.
+
+## Task 5.6 companies staging verification
+
+Verified September 29, 2026 (local time), using Python 3.11.0 / PostgreSQL 17.11 / dbt Core 1.12.5 / dbt-postgres 1.11.0. Only task 5.6 was implemented. Before-task copies and 126 file hashes were captured under `/private/tmp/data-platform-task56`; `.env` was hashed without copying its contents. Existing uncommitted changes and tracked artifacts were preserved. No dependencies, ingestion code, source declarations, profiles, or schema settings changed.
+
+Exact test, build, and service verification commands from the repository root, in execution order:
+
+```bash
+# Initial service state: Running/Loaded/Schedulable all false.
+/opt/homebrew/bin/brew services info postgresql@17
+# Narrow offline suite: 19 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_stg_companies.py tests/test_dbt_stg_platforms.py tests/test_dbt_stg_genres.py tests/test_dbt_stg_games.py tests/test_dbt_sources.py tests/test_raw_companies.py
+# Full default suite: 422 passed, 39 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Narrow dbt/PostgreSQL suite: 24 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full enabled suite: 461 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing local build, comparisons, raw/history preservation, schema cleanup: passed.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task56/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+git diff --check
+```
+
+All test runs passed on their first attempts. Service startup and database commands ran outside the network sandbox. Readiness reported accepting connections before database tests. Final service flags were all false, and final readiness returned exit **2**, `no response`, as expected. The cluster remains on disk, stopped and unregistered.
+
+The integration fixture expects exactly four staging views and ten passing source tests. The six new parameterized company cases retain explicit, legacy, and explicit-over-legacy source schema settings and independent disposable `DBT_SCHEMA` outputs. They query actual PostgreSQL column types, view materialization, every output value, raw IDs, and one-row-per-ID grain. Fixtures include missing optional fields, explicit JSON null, nullable names/slugs, empty strings, Unicode, epoch zero, negative Unix seconds, a modern timestamp, and a BIGINT ID beyond 32 bits. An invalid non-null timestamp fails on read as expected. All eighteen earlier games/genres/platforms cases remain. Default tests skip all 39 database cases; no test calls IGDB.
+
+A read-only pre-build count confirmed **five existing companies**; no ingestion or live-source request was needed. The local harness repeats that count before building, loads existing `.env` through settings without schema overrides, and disables dbt usage reporting. Its exact dbt subprocess command was:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task56/existing-dbt/target --log-path /private/tmp/data-platform-task56/existing-dbt/logs
+```
+
+Result: **4 views built, 10 source tests passed**, raw schema `analytics`, output schema `analytics`. Only expected unused intermediate/marts configuration warnings appeared. Company output types were `BIGINT`, `TEXT`, `TEXT`, `TIMESTAMPTZ`, `TIMESTAMPTZ` in the documented order. Every output field for all five companies matched raw IDs, names/slugs, payload update times, and fetched times:
+
+| company_id | name | slug | source_updated_at (UTC) |
+|---|---|---|---|
+| 1 | Electronic Arts | electronic-arts | 2026-09-22 02:05:30 |
+| 2 | BioWare | bioware | 2026-09-11 15:00:09 |
+| 3 | Looking Glass Studios | looking-glass-studios | 2026-09-07 23:11:40 |
+| 4 | Eidos Interactive | eidos-interactive | 2026-09-17 16:52:56 |
+| 5 | Interplay Entertainment | interplay-entertainment | 2026-09-17 18:25:51 |
+
+All five retained raw `fetched_at = 2026-09-27 02:57:11.745586+00:00`. Five games, five genres, and five platforms also matched every output value against raw records. Hashes of all five raw tables and `ingestion_runs` matched before/after the local build. No `test_dp_%` schemas remained after fixture cleanup. Detailed results are retained at `/private/tmp/data-platform-task56/existing-dbt/verification.json`; the harness and task-only diff are in the same temporary task directory. dbt targets/logs stayed outside the repository, and all four views remain available when PostgreSQL restarts. `.env`, baseline edits, raw archives, and existing tracked generated/private artifacts were preserved; nothing was committed or untracked.
+
+The real sample contains no missing company values; synthetic PostgreSQL fixtures verify missing/null behavior. A view build and source-key tests alone do not evaluate all casts. Invalid non-null timestamps fail on read by design, and five stored rows do not establish full source coverage. Task 5.7 and broader model tests/YAML documentation under 5.8–5.9 remain open.
+
+## Task 5.7 involved-companies staging verification
+
+Verified September 30, 2026 (local time), using Python 3.11.0 / PostgreSQL 17.11 / dbt Core 1.12.5 / dbt-postgres 1.11.0. Only task 5.7 was implemented. Before-task copies and 128 file hashes were captured under `/private/tmp/data-platform-task57`; `.env` was hashed without copying its contents. Existing uncommitted changes and tracked artifacts were retained. No repository dependencies, ingestion code, source declarations, profiles, or schema settings changed.
+
+The requested temporary virtual environment was incomplete: `pyvenv.cfg`, pytest's entrypoint, and pip files were missing. The first narrow run failed before collection with `No module named pytest`; restoring the venv metadata alone then exposed missing `pytest.__main__` and `pip.__main__`. Repair commands were:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m venv --without-pip /private/tmp/data-platform-phase1-venv
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m ensurepip --upgrade
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pip install --ignore-installed -r requirements.txt > /private/tmp/data-platform-task57/environment-repair.log 2>&1
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pip check
+```
+
+The unchanged bounded requirements were reinstalled into the same requested environment; no repository files or dependency requirements changed. `pip check` reported no broken requirements, with warnings about four leftover damaged metadata directories. dbt Core, dbt-postgres, pytest (8.4.2), and psycopg (3.3.6) retained their baseline versions. Other transitive packages were resolved again from the existing ranges. No generated/private artifact was deleted or untracked.
+
+Exact test, build, and service commands from the repository root:
+
+```bash
+# Initial state: Running/Loaded/Schedulable all false.
+/opt/homebrew/bin/brew services info postgresql@17
+# After environment repair: 20 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_stg_involved_companies.py tests/test_dbt_stg_companies.py tests/test_dbt_stg_platforms.py tests/test_dbt_stg_genres.py tests/test_dbt_stg_games.py tests/test_dbt_sources.py tests/test_raw_involved_companies.py
+# Full default suite: 423 passed, 45 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Narrow dbt/PostgreSQL suite: 30 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full enabled suite: 468 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing local build, row comparisons, raw/history hashes, schema cleanup: passed.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task57/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+git diff --check
+```
+
+All tests passed after the environment repair. Readiness reported accepting connections before database work. Database commands used the existing project login outside the network sandbox. The service was stopped immediately after the local comparison: all three service flags were false and final readiness returned exit **2**, `no response`, as expected. The on-disk cluster remains intact.
+
+The integration fixture now expects exactly five staging views and ten passing source tests. Six new parameterized cases retain explicit, legacy, and explicit-over-legacy source settings with independent disposable `DBT_SCHEMA` outputs. Five fixtures remain in each earlier source; six involved-company fixtures cover missing fields, explicit JSON null, all four developer/publisher combinations, epoch zero, negative and modern timestamps, zero and BIGINT references, a BIGINT relationship ID, and distinct IDs sharing an unmatched game/company pair. Queries check actual column types, view materialization, every output value, raw IDs, and relationship-record grain. Invalid non-null game/company references, roles, and timestamps each fail on read as expected. All 24 earlier staging cases and all ingestion regressions remain; no test calls IGDB. The default suite skips all 45 database cases.
+
+A read-only check before database tests counted **five existing involved-company records** in `analytics.raw_involved_companies` and saved raw/history hashes to `/private/tmp/data-platform-task57/raw-before-tests.json`. The local harness repeated the count before building, loaded existing `.env` through settings without schema overrides, and disabled dbt usage reporting. No ingestion or live-source request was needed. Its exact dbt subprocess command was:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task57/existing-dbt/target --log-path /private/tmp/data-platform-task57/existing-dbt/logs
+```
+
+Result: **5 views built, 10 source tests passed**, raw schema `analytics`, output schema `analytics`. Only expected unused intermediate/marts configuration warnings appeared. Actual involved-company output types, in order, were `BIGINT`, `BIGINT`, `BIGINT`, `BOOLEAN`, `BOOLEAN`, `TIMESTAMPTZ`, `TIMESTAMPTZ`. Every field matched raw IDs, payload references/roles/update times, and fetched times:
+
+| involved_company_id | game_id | company_id | developer | publisher |
+|---|---|---|---|---|
+| 2 | 38 | 1 | false | true |
+| 6 | 2 | 3 | true | false |
+| 7 | 2 | 4 | false | true |
+| 8 | 38 | 7 | true | false |
+| 9 | 37 | 11 | true | false |
+
+All five source updates were `2011-11-12 00:00:00+00:00`; all five unchanged fetch timestamps were `2026-09-27 02:57:12.236506+00:00`. Each ID appeared exactly once. References outside the stored games/companies samples remained present. Five games, genres, platforms, and companies each also matched every output value against their raw records.
+
+Hashes of all five raw tables and `ingestion_runs` matched before tests, before the local build, and after the build. No `test_dp_%` schemas existed before tests or remained afterward. Detailed results are at `/private/tmp/data-platform-task57/existing-dbt/verification.json`; the harness, baseline hashes, and task-only diff are in the task directory. dbt targets/logs stayed outside the repository. The five views persist for the next PostgreSQL session. `.env`, baseline edits, raw archives, and existing tracked artifacts were preserved; nothing was committed or untracked.
+
+The real sample has no missing fields and covers developer-only/publisher-only roles. Synthetic fixtures verify missing/null and both-true/both-false cases. View creation and source-key tests alone do not validate scalar casts; malformed non-null scalars fail on read. Five stored rows do not establish source or reference completeness. Broader dbt model tests and YAML documentation remain tasks 5.8–5.9; no later checkbox changed.
+
+## Tasks 4.5 through 5.3 reassessment fixes
+
+Verified September 29, 2026 with Python 3.11.0, PostgreSQL 17.11, dbt Core 1.12.5, and dbt-postgres 1.11.0. dbt now resolves raw sources with `POSTGRES_RAW_SCHEMA`, then legacy `POSTGRES_SCHEMA`, then `raw`, matching Python. Four offline cases protect default/explicit/legacy/precedence behavior; six database cases also exercise dbt’s real schema rendering and SQL execution. The existing staging SQL and ingestion implementation are retained.
+
+Exact test commands, from the repository root:
+
+```bash
+# Before changes: 7 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_config.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py
+# After changes: 11 passed, 21 skipped (explicit database opt-in required).
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_config.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py tests/integration
+/opt/homebrew/bin/brew services run postgresql@17
+# Narrow database suites: 15 passed, then 6 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_ingestion_postgres.py
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full default suite: 419 passed, 21 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Full enabled suite: 440 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+```
+
+A separate local verification loaded `.env` through the existing settings module and ran the dbt CLI with no source/output schema overrides. Its exact invocation was:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-review-fixes/verify_existing_dbt.py
+```
+
+That temporary harness invoked `dbt build` through the installed Python CLI, with project/profile paths pointing to this repository’s `dbt/` directory, `--no-partial-parse`, and targets/logs under `/private/tmp/data-platform-review-fixes/existing-dbt/`. All ten source tests passed, and `analytics.stg_games` was created successfully over the existing `analytics.raw_games`. All five existing game rows were queried, including their typed timestamps/numbers and relationship arrays. Before/after hashes of existing raw tables and ingestion history matched. This view remains available locally; no schema migration or `.env` change was needed.
+
+The earlier September 29 audit separately passed two five-record live all-entity runs, bounded backfill filters on all five endpoints, and a capped full refresh. Its source requests were not repeated for this configuration/test-only fix. An initial Twitch OAuth timeout during that audit passed on rerun; no source-completeness claim follows from these bounded checks.
+
+After validation, all temporary integration schemas were absent. `git diff --check` and local documentation-link checks passed. PostgreSQL was stopped using `brew services stop postgresql@17`; `services info` reported all three service flags false, and `pg_isready` returned exit 2/no response as expected. Existing tracked generated/private artifacts were retained. No later roadmap checkbox changed.
+
+## Task 5.8 dbt tests verification
+
+Verified September 30, 2026. Only task 5.8 was implemented. `dbt/models/staging/schema.yml` adds ten default-error `unique`/`not_null` tests on the five staging primary identifiers. The ten existing source tests remain. No strict relationship test is justified by current ingestion coverage: independent bounded loads omit referenced games/companies/lookup/relationship records, references are nullable, and game arrays have no bridge model yet. The [per-relationship deferral table](../pipeline/DBT_TRANSFORMATIONS.md#staging-identifier-tests-task-58) records the rationale. No model SQL, ingestion behavior, dependency, source definition, schema precedence, or independent `DBT_SCHEMA` behavior changed. Task 5.9 remains open.
+
+Added one offline YAML/entity-key contract test and six opt-in database cases (duplicate/NULL × explicit/legacy/explicit-over-legacy schema modes). The existing thirty dbt and fifteen ingestion database regressions remain. Each failure case first builds five valid views and passes twenty tests, then alters only disposable staging views. One duplicate or NULL identifier per model must produce exactly five matching model-test failures (one violation each); the other fifteen tests, including all source tests, must pass. Restoring the original views must return all twenty tests to passing. Raw PK constraints stay intact. Existing fixture values retain absent/null references, repeated game/company pairs, independent roles, and invalid-scalar checks; each game reference array now also contains an unloaded ID. Manifest assertions check model test dependencies, tested columns, severity, exact model/test counts, source precedence, and separate output schemas.
+
+Exact commands from the repository root (requested Python environment, bytecode/cache writes disabled):
+
+```bash
+# Baseline narrow checks: 11 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_sources.py tests/test_dbt_stg_games.py tests/test_dbt_stg_genres.py tests/test_dbt_stg_platforms.py tests/test_dbt_stg_companies.py tests/test_dbt_stg_involved_companies.py
+# Updated narrow offline checks: 12 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_staging_tests.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py tests/test_dbt_stg_genres.py tests/test_dbt_stg_platforms.py tests/test_dbt_stg_companies.py tests/test_dbt_stg_involved_companies.py
+# Full default suite: 424 passed, 51 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Initial service state: Running/Loaded/Schedulable all false.
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/bin/brew services run postgresql@17
+# Accepting connections before database work.
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Focused database suite: 36 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full enabled suite: 475 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Local build, all staging row comparisons, preservation hashes, schema cleanup.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task58/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task58/check_docs.py
+git diff --check
+```
+
+The local harness loads the existing `.env` without overrides and invokes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task58/existing-dbt/target --log-path /private/tmp/data-platform-task58/existing-dbt/logs
+```
+
+Result: **five views built; ten source and ten staging tests passed** over existing `analytics` raw tables, with output schema `analytics`. Every column in all five existing rows per staging model matched the raw records. No ingestion was needed. Before tests, the configured raw tables each had five rows and `ingestion_runs` had 21 rows. Their hashes matched before tests, before the local build, and after the build. No disposable `test_dp_%` schemas existed initially or remained after validation. Synthetic failures were expected assertions, not suite failures. Only unused intermediate/marts configuration warnings appeared in dbt.
+
+PostgreSQL was started with `services run`, then stopped/unregistered: all three service flags false, final readiness exit 2 / no response. Database work ran outside the network sandbox. Temporary dbt targets/logs stayed outside the repository. Before-task copies and 130 hashes, raw/history hashes, the local harness/results, and a task-only diff are under `/private/tmp/data-platform-task58`; `.env` was hashed without copying its contents. Existing user changes, local raw archives, and the 26 already tracked generated/local artifacts were retained; nothing was committed, deleted, untracked, migrated, or reset.
+
+The final documentation check passed 87 local links/anchors, `git diff --check` passed, and the baseline comparison found only the nine task files changed/created. All other baseline hashes, including `.env` and tracked artifacts, matched; only roadmap checkbox 5.8 changed.
+
+Passing identifier tests does not validate every projected scalar cast or prove source/reference completeness. Full model/column YAML documentation and its build verification remain task 5.9.
+
+## Task 5.9 model documentation and build verification
+
+Verified September 30, 2026. Only task 5.9 was implemented. `dbt/models/staging/schema.yml` now describes all five staging models and all 35 output columns from the verified contracts: source lineage, entity/relationship-record grain, SQL types, nullable values, Unix-seconds timestamps, ratings/counts, JSONB array distinctions, loader timestamps, and independent role flags. Existing identifier tests, relationship-test deferrals, SQL, source-schema precedence, and independent `DBT_SCHEMA` are unchanged. Descriptions are dbt metadata; no persisted comments, enforced constraints, dependencies, ingestion, or Phase 6 models were added.
+
+Five parameterized offline cases check descriptions and exact column coverage against SQL projections, rejecting missing, duplicate, stale, or blank column documentation. The existing identifier-test assertion now permits documented optional columns while requiring tests only on primary identifiers. Existing PostgreSQL fixtures additionally compare documented manifest columns with actual view columns and require nonempty descriptions under explicit, legacy, and conflicting schema settings. Existing scalar/null/reference/role/grain checks and deliberate duplicate/NULL failures with recovery remain intact.
+
+Exact commands from the repository root:
+
+```bash
+# Start the requested service; await accepting connections.
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow checks: 12 passed. After documentation/coverage changes: 17 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_staging_tests.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py tests/test_dbt_stg_genres.py tests/test_dbt_stg_platforms.py tests/test_dbt_stg_companies.py tests/test_dbt_stg_involved_companies.py
+# Focused database suite: 36 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py
+# Full default suite: 429 passed, 51 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Full enabled suite: 480 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing-data build, parsed documentation, all staging values, preservation, and schema cleanup.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task59/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task59/check_docs.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task59/check_preservation.py
+git diff --check
+```
+
+The existing-data harness loads `.env` without overrides and disables dbt usage reporting. It invokes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task59/existing-dbt/target --log-path /private/tmp/data-platform-task59/existing-dbt/logs
+```
+
+Result: **five views built and twenty dbt tests passed** (ten source, ten staging). All five model descriptions and 35 column descriptions exactly matched the parsed manifest and covered the actual view columns. Every output value in all five existing rows per staging model matched raw records. Both existing source/output schemas remained `analytics`; isolated integration tests retained separate output schemas and all three source-precedence modes. No ingestion was needed. Only expected unused intermediate/marts configuration warnings appeared.
+
+Before testing, all five raw tables had five rows and `ingestion_runs` had 21 rows. SHA-256 hashes of sorted raw/history rows matched before tests, before the existing-data build, and afterward. No disposable `test_dp_%` schemas existed initially or remained after verification; fixtures drop only their own schemas. Targets/logs stayed outside the repository. The initial sandboxed service start failed with launchctl bootstrap exit 5; retry outside the sandbox succeeded. The initial socket readiness probe had no response; the explicit localhost probe confirmed readiness before database work. Database tests/build ran outside the network sandbox. PostgreSQL was stopped/unregistered afterward: Running/Loaded/Schedulable all false; readiness exit 2, no response.
+
+Before-task copies, 153 baseline file hashes, raw/history hashes, verification scripts/results, and the task-only diff are under `/private/tmp/data-platform-task59`. `.env` was hashed without copying its contents. Only the nine task files changed; all other baseline hashes matched, including `.env`, raw archives, and the 26 previously reported tracked generated/local artifacts. Nothing was committed, deleted, untracked, migrated, or reset. Documentation link/anchor checks and `git diff --check` passed. Only roadmap checkbox 5.9 changed, completing Phase 5; Phase 6 remains unimplemented.
+
+A successful view build and identifier tests still do not evaluate every scalar cast or prove source/reference completeness. This verification queries every stored staging column separately, while synthetic fixtures cover nullable/malformed inputs and incomplete references. Strict relationship checks remain deferred under the existing per-key policy.
+
 ## Target test layers
 
 ### Unit tests
@@ -1469,7 +1904,7 @@ No network/database dependency.
 
 ### Database integration tests
 
-Add a small set once Docker/PostgreSQL setup is stable. Validate behavior that fakes cannot prove, such as:
+The opt-in suite above now runs against the local PostgreSQL setup. It validates behavior that fakes cannot prove, including:
 
 - actual table DDL;
 - JSONB writes;

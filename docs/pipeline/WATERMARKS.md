@@ -1,6 +1,6 @@
 # High-water-mark semantics (task 4.1)
 
-**Accepted task 4.1 design; tasks 4.2–4.7 implemented and verified offline.** The design was reviewed September 26, 2026 against the contracts, fetchers, paginator, CLI, runner, storage helpers, and offline tests. Normal CLI runs use per-entity persisted lookup, a fixed run-start cutoff, and optional windows; eligible successes publish the cutoff after the raw context exits. Explicit full refresh and backfill are available. No live incremental ingestion or PostgreSQL validation has been performed.
+**Accepted task 4.1 design; tasks 4.2–4.7 implemented with offline and PostgreSQL integration coverage.** The design was reviewed September 26, 2026 against the contracts, fetchers, paginator, CLI, runner, storage helpers, and offline tests. Normal CLI runs use per-entity persisted lookup, a fixed run-start cutoff, and optional windows; eligible successes publish the cutoff after the raw context exits. Explicit full refresh and backfill are available. The September 29 reassessment verified bounded live CLI normal/refresh runs and backfill filters. Repeatable [PostgreSQL integration checks](../engineering/TESTING.md#postgresql-integration-tests) now verify committed checkpoint lifecycles using controlled source responses. An uncapped live source bootstrap and source completeness remain unverified. Historical task verification sections below record the original offline-only checks.
 
 ## Persisted lookup helper (task 4.2)
 

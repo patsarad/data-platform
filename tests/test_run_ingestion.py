@@ -327,6 +327,7 @@ def test_single_entity_selection(monkeypatch, name, override):
     runner.assert_called_once()
     supplied = runner.call_args.kwargs
     assert supplied["entity"] is getattr(run_ingestion, name.upper())
+    assert supplied["schema_name"] == "raw"
     assert supplied["fetch_records"].func is getattr(run_ingestion, f"fetch_{name}_batches")
     assert supplied["fetch_records"].keywords == {"batch_size": 7, "max_batches": 3}
     assert supplied["archive_records"] is getattr(run_ingestion, f"save_{name}_to_jsonl")

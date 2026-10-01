@@ -25,6 +25,10 @@ Use dbt tests for:
 - mart grain uniqueness;
 - required dimensions/metrics.
 
+Task 5.8 adds ten staging primary-identifier tests (`unique`/`not_null`) alongside the ten raw source-key tests. The involved-company key is its own record ID; repeated game/company pairs are valid. Optional references remain nullable. Strict foreign-key tests are deferred because independently bounded raw loads do not guarantee referenced rows, and game references still use JSONB arrays. The [test policy and per-relationship deferrals](../pipeline/DBT_TRANSFORMATIONS.md#staging-identifier-tests-task-58) record when to reconsider these checks. Successful identifier tests do not validate all scalar casts or source completeness.
+
+Task 5.9 adds documentation coverage for all five staging models and 35 columns. Offline checks compare YAML documentation with SQL projections; database checks compare the parsed manifest with actual view columns. Documentation preserves nullable/reference semantics and adds no new data-quality constraints.
+
 ## Rating metrics
 
 IGDB rating fields can be misleading when very few users contributed ratings. Analytics marts/app views that rank or compare ratings should include rating-count context and, where ranking is used, a documented minimum-count threshold or other explicit rule.
