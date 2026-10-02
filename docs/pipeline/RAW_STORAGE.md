@@ -6,6 +6,11 @@ The raw PostgreSQL layer is the durable boundary between source ingestion and an
 
 ## Current state
 
+The verified task 7.1 Compose definition provides a separate PostgreSQL 17 data
+volume that retains committed data across container replacement. It does not load raw data or copy the native
+cluster's tables/history. Host and port select the cluster independently of raw
+schema settings. See [Docker operation and native coexistence](../engineering/LOCAL_DEVELOPMENT.md#docker-postgresql-task-71).
+
 `src/storage/raw_games.py` owns PostgreSQL connection creation, raw-games DDL, and upserts. `run_ingestion.py` supplies its table/upsert helpers to `pipeline.ingest_entity()`, which imports the connection factory and coordinates connection contexts. The table is `<POSTGRES_RAW_SCHEMA>.raw_games`, defaulting to `raw.raw_games`. Its columns are:
 
 ```text

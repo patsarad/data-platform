@@ -1,0 +1,87 @@
+version: 2
+
+models:
+  - name: int_game_companies
+    description: >-
+      One row per involved_company_id from stg_involved_companies. This view
+      preserves distinct relationship records sharing a game/company pair, even
+      with identical roles; it performs no deduplication, joins, or filtering.
+      Raw upserts handle repeated versions of the same record; unexpected duplicate
+      staged IDs fail uniqueness rather than being collapsed. Independently bounded
+      ingestion may omit referenced games or companies. Game involved_company_ids
+      are relationship record IDs, not company IDs, and do not drive this model.
+      Downstream counts must distinguish records from distinct games or pairs.
+    columns:
+      - name: involved_company_id
+        description: >-
+          Required unique BIGINT relationship record identifier from staging,
+          originally raw_involved_companies.igdb_id; not a company identifier.
+        data_tests: [unique, not_null]
+      - name: game_id
+        description: >-
+          Nullable BIGINT game reference from staging. Missing and JSON null become
+          SQL NULL; unmatched, zero, and negative IDs are retained. Invalid non-null
+          values fail the existing staging cast when evaluated. No required-reference,
+          reference-existence, positivity, or reciprocal-array constraint is imposed.
+      - name: company_id
+        description: >-
+          Nullable BIGINT company reference from staging, not the relationship ID.
+          Missing and JSON null become SQL NULL; unmatched, zero, and negative IDs
+          survive. Invalid non-null values fail the existing staging cast on read.
+          Neither this reference nor the game/company pair is unique.
+      - name: developer
+        description: >-
+          Nullable BOOLEAN developer flag from staging, independent of publisher.
+          True, false, and unknown (SQL NULL for missing/JSON null) remain distinct;
+          both roles may be true or false. No default or exclusivity is inferred.
+          Invalid non-null values fail the existing BOOLEAN cast when evaluated.
+      - name: publisher
+        description: >-
+          Nullable BOOLEAN publisher flag from staging, independent of developer.
+          True, false, and unknown (SQL NULL for missing/JSON null) remain distinct;
+          both roles may be true or false. No default or exclusivity is inferred.
+          Invalid non-null values fail the existing BOOLEAN cast when evaluated.
+
+  - name: int_game_genres
+    description: >-
+      One row per distinct (game_id, genre_id) pair expanded from stg_games.genre_ids.
+      This view collapses duplicate IDs within each game after BIGINT conversion;
+      array order is not retained. Absent keys (SQL NULL), JSON null, and empty
+      arrays produce no rows, without asserting that a game has no real-world genres.
+      No genre lookup join is applied: independently bounded ingestion may omit
+      referenced genres. Non-array values and non-null members that cannot cast
+      to BIGINT fail on read; null members fail the genre_id not_null test.
+    columns:
+      - name: game_id
+        description: >-
+          Non-null BIGINT game identifier from stg_games.game_id. A game can appear
+          for multiple genres; uniqueness applies to the pair, not this column.
+        data_tests: [not_null]
+      - name: genre_id
+        description: >-
+          Non-null BIGINT genre reference cast from a stg_games.genre_ids member.
+          A genre can appear for multiple games. Unmatched IDs are retained;
+          reference-existence and positivity tests are not justified by ingestion coverage.
+        data_tests: [not_null]
+
+  - name: int_game_platforms
+    description: >-
+      One row per distinct (game_id, platform_id) pair expanded from stg_games.platform_ids.
+      This view collapses duplicate IDs within each game after BIGINT conversion;
+      array order is not retained. Absent keys (SQL NULL), JSON null, and empty
+      arrays produce no rows, without asserting that a game has no real-world platforms.
+      No platform lookup join is applied: independently bounded ingestion may omit
+      referenced platforms. Non-array values and non-null members that cannot cast
+      to BIGINT fail on read; null members fail the platform_id not_null test.
+    columns:
+      - name: game_id
+        description: >-
+          Non-null BIGINT game identifier from stg_games.game_id. A game can appear
+          for multiple platforms; uniqueness applies to the pair, not this column.
+        data_tests: [not_null]
+      - name: platform_id
+        description: >-
+          Non-null BIGINT platform reference cast from a stg_games.platform_ids member.
+          A platform can appear for multiple games. Unmatched IDs are retained;
+          reference-existence and positivity tests are not justified by ingestion coverage.
+        data_tests: [not_null]

@@ -32,6 +32,23 @@ Airflow orchestrates ingestion → dbt build/test.
 Docker Compose provides reproducible local services.
 ```
 
+Task 7.1 adds the database-only definition in `compose.yaml`: PostgreSQL
+17.11 Bookworm, a TCP readiness check, and a project-scoped named data volume.
+The host connection binds to loopback port 5433 by default, separate from native
+Homebrew PostgreSQL on 5432. Credentials are supplied externally; no application
+runtime or custom database bootstrap is included. Task 7.1 is verified with Colima:
+health, authenticated SQL, volume persistence across container replacement, shutdown,
+and the full enabled suite pass. See [local operation and storage isolation](engineering/LOCAL_DEVELOPMENT.md#docker-postgresql-task-71).
+
+Task 7.2 adds a shared Python 3.11/dbt image in `docker/Dockerfile`, with the
+unchanged dependency requirements, source, dbt definitions and test suite under
+`/app`. Direct commands run as a non-root user; default invocation displays
+ingestion CLI help. Credentials remain external, and dbt artifacts default to
+`/tmp`. The build context excludes local/private data and generated files.
+Python still owns ingestion/raw loading and dbt owns transformations. Compose
+continues to define PostgreSQL only; runtime service wiring and clean-volume
+pipeline validation remain later tasks. See [image commands](engineering/LOCAL_DEVELOPMENT.md#shared-pythondbt-image-task-72).
+
 ## Layer responsibilities
 
 ### Source layer — IGDB
@@ -75,7 +92,7 @@ Task 3.3 adds `fetch_companies.py` and `raw_companies.py` following the same loo
 
 Task 3.4 adds `fetch_involved_companies.py` and `raw_involved_companies.py` with the same paginator and runner. The relationship contract requests its own ID, game/company IDs, developer/publisher roles, and the documented source update time. The raw table uses only `igdb_id`, complete JSONB `payload`, and `fetched_at`; references/roles remain in JSONB for dbt, without foreign keys to bounded raw samples or invented name/slug columns. Offline tests and two bounded live runs verified this path. No existing entity schema changed.
 
-Task 3.5 appends genre, platform, and involved-company record ID arrays to the games contract. The existing fetch/archive/load path preserves them inside complete raw payloads; the games schema and runner are unchanged. Involved-company record IDs lead to company references and role flags, not directly to companies. Array extraction and relationship joins remain future dbt work.
+Task 3.5 appends genre, platform, and involved-company record ID arrays to the games contract. The existing fetch/archive/load path preserves them inside complete raw payloads; the games schema and runner are unchanged. Involved-company record IDs lead to company references and role flags, not directly to companies. Genre and platform array expansion is implemented in dbt tasks 6.1–6.2; task 6.3 projects company relationships directly from involved-company staging records.
 
 Task 3.6 composes each selected entity with its own durable start, raw-load context, and terminal metadata. The loop is fail-fast: a failure propagates and later entities are never started; earlier completed entities remain committed. There is no group transaction or parent run. A single-entity output override is allowed, but `all` with `--output-path` is rejected during argument parsing before source/database work. The fixed order does not imply reference-existence requirements.
 
@@ -141,11 +158,11 @@ int_game_platforms
 int_game_companies
 ```
 
-Exact models should follow the final source payload design rather than being created speculatively.
+Task 6.1 implements `int_game_genres`: a view over `stg_games` with one distinct BIGINT `(game_id, genre_id)` pair per represented association. Absent/null/empty arrays produce no rows; duplicate IDs collapse, and unmatched genre IDs survive without a lookup join. Null members fail a key test and malformed non-null values fail on evaluation. See the [relationship contract](pipeline/DBT_TRANSFORMATIONS.md#int_game_genres-task-61). Task 6.2 adds `int_game_platforms` at distinct BIGINT `(game_id, platform_id)` grain with the same expansion, duplicate, null, and malformed-input semantics. Unmatched platform IDs survive independently bounded ingestion; no reference-existence test is imposed. See the [platform contract](pipeline/DBT_TRANSFORMATIONS.md#int_game_platforms-task-62). Task 6.3 adds `int_game_companies`, a five-column view over `stg_involved_companies` at relationship-record grain. Distinct IDs sharing a pair remain separate; nullable/unmatched references and independent nullable developer/publisher flags pass through unchanged. Only the record ID is required and unique. See the [company relationship contract](pipeline/DBT_TRANSFORMATIONS.md#int_game_companies-task-63). The first catalog mart is described below.
 
 #### Marts
 
-Marts should answer concrete analytics questions and expose a stable contract to Streamlit. Keep the number small and purposeful. Candidate marts include:
+Marts should answer concrete analytics questions and expose a stable contract to Streamlit. Keep the number small and purposeful. The implemented marts are:
 
 ```text
 mart_game_catalog
@@ -155,7 +172,48 @@ mart_platform_performance
 mart_company_output
 ```
 
-The final mart set should be chosen after staging/intermediate models exist and real source coverage is understood.
+Task 6.4 implements `mart_game_catalog` as an eleven-column table in `DBT_SCHEMA`,
+following the existing marts materialization convention. Its grain is exactly one
+row per staged game. Nullable descriptive/release/rating fields pass through;
+genre/platform objects and company relationship-record objects are independently
+aggregated before left joining to games. Stable numeric ID ordering, unmatched
+references, independent nullable roles, and observed-data caveats are part of the
+[column contract](pipeline/DBT_TRANSFORMATIONS.md#mart_game_catalog-task-64).
+Rebuild the table after ingestion to refresh exploration data.
+
+Task 6.5 defines `mart_release_trends` as a two-column table directly over
+`stg_games`, with one row per observed UTC calendar year of the game-level
+`first_release_at` and a count of dated games. Explicit UTC extraction makes
+years independent of session timezone; no relationship join can inflate counts.
+NULL dates are excluded without implying unreleased games. Unobserved years are
+omitted; bounded data cannot establish real-world absence. Summed annual counts
+plus undated staged games reconcile to the full staged population at the same
+snapshot. Valid zero/negative epochs pass through existing casts without cutoffs.
+See the [release-trend contract](pipeline/DBT_TRANSFORMATIONS.md#mart_release_trends-task-65).
+Rebuild after ingestion.
+
+Task 6.6 adds separate seven-column `mart_genre_performance` and
+`mart_platform_performance` tables, one row per observed dimension ID. Each
+independently deduplicates bridge pairs, joins staged games, groups by dimension
+ID, then left joins its staged label. Unmatched/unnamed IDs survive; loaded
+unobserved dimensions are omitted. Five metrics expose game count, non-NULL rating
+count, unweighted mean rating, non-NULL rating-count contributor count, and summed
+rating counts. Missing values remain distinct from supplied zeros; no valid staged
+value is filtered by a new threshold. Cross-dimension counts can repeat games.
+See the [performance contract](pipeline/DBT_TRANSFORMATIONS.md#genreplatform-performance-task-66).
+Rebuild after ingestion.
+
+Task 6.7 adds the nine-column `mart_company_output` table: one row per observed
+non-NULL company reference in `int_game_companies`, including unloaded companies
+and companies whose only game references are NULL. The relationship records alone
+drive membership. Counts distinguish records, NULL-game records, distinct game
+references (including unloaded games), loaded games, and explicit developer/publisher
+game output. Any true record qualifies its game for that role; unknown is not false
+and the role counts overlap. Aggregation precedes the company-label lookup; game
+presence uses an existence check to avoid fanout. Loaded companies without observed
+relationships are omitted. This is bounded observed output, never a complete
+company catalog. See the [company-output contract](pipeline/DBT_TRANSFORMATIONS.md#mart_company_output-task-67).
+Rebuild after ingestion; NULL-company records remain upstream for reconciliation.
 
 ### Orchestration layer — Airflow
 

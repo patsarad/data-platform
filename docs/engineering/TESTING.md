@@ -25,9 +25,60 @@ In PowerShell, set `$env:RUN_POSTGRES_INTEGRATION = "1"` before the command. Con
 Each test creates unique `test_dp_<uuid>_raw` / `_dbt` schemas and drops only those schemas in fixture cleanup, including on assertion failures. Hard process termination can interrupt cleanup; there is no blanket prefix-based deletion. Existing configured raw/output schemas are not used for fixture data. JSONL and dbt targets/logs go to pytest temporary directories. No extra dependencies are required.
 
 - `test_ingestion_postgres.py`: actual raw/metadata transactions for games, companies, and involved companies; bootstrap, overlap, duplicate-safe updates, caps, backfill, full refresh, empty success, raw SQL rollback, terminal SQL failure after committed raw data, retry, and guarded failure after a simulated lost acknowledgment. Source pages and the run clock are controlled; the database is real, with fresh connections checking committed state.
-- `test_dbt_postgres.py`: five synthetic rows per entity source and six involved-company records; actual dbt builds of `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` plus ten source and ten staging identifier tests under explicit, legacy, and conflicting source-schema settings; PostgreSQL column types, view materialization, and every staging output value; missing/null/empty/zero/negative-epoch/large-ID/large-count/decimal/array cases; genre/platform/company/relationship grain and raw IDs; repeated and unmatched game/company pairs; all four developer/publisher combinations and nullable roles; and invalid scalar reads. Six task 5.8 cases deliberately break each disposable staging view with duplicate/NULL identifiers, require five specific model-test failures while source tests pass, then restore the views and require all twenty tests to pass. Missing references in all three games arrays and nullable/repeated/unmatched involved-company references remain valid. Task 5.9 also requires nonempty model/column descriptions in the manifest covering every actual view column.
+- `test_dbt_postgres.py`: **68 cases**: 65 distinct data-behavior scenarios using
+  explicit raw-schema settings, plus three complete project builds for explicit,
+  legacy, and explicit-over-legacy configuration. The full-project cases verify
+  all 13 models and 46 dbt tests, source resolution, independent output schemas,
+  staging lineage/identifier tests, all model/column documentation, and independent
+  catalog/release/performance/company-output value comparisons. Each forces a fresh
+  parse, then repeats all dbt tests using its own parse cache and compares model/source
+  resolution and documentation. The behavior scenarios retain their original
+  assertions, malformed inputs, deliberate failures and recovery checks.
 
-These tests never call IGDB. HTTP requests in the test process are rejected, and dbt usage reporting is disabled in subprocesses. Live API smoke checks remain separate. The suite does not prove source completeness, real network acknowledgment loss, server-crash durability, or production-wide data quality. `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` are views: a successful `dbt build` does not evaluate their casts for every raw row. The integration tests explicitly query their output using known fixtures; the dbt key tests inspect raw and staging identifiers, not all scalar casts.
+The test matrix now separates schema configuration from data behavior. Every
+scenario still gets fresh disposable schemas and an external artifact directory.
+`loaded_sources` loads the original five rows per entity and six involved-company
+records. `built_staging` uses `dbt run` for the five staging views plus dependencies
+explicitly declared with `@pytest.mark.dbt_models(...)`. It does not build unrelated
+marts or rerun the whole project's tests in every setup. Full builds and their
+manifest assertions live in `test_full_project_schema_modes`. Focused dbt tests
+and recovery builds retain their assertions, with catalog totals/failure expectations
+extended for task 6.8. Cautious indirect selection remains where needed.
+
+| Coverage family | Earlier cases (three schema modes) | Current distinct behavior cases | Retained checks |
+|---|---:|---:|---|
+| Staging | 36 | 12 | Every scalar/type, identifier failures/recovery, malformed casts |
+| Game genres | 15 | 5 | Exact pairs, null/invalid members, key/grain failures/recovery |
+| Game platforms | 15 | 5 | Exact pairs, cast-normalized duplicates, malformed/key failures |
+| Game companies | 12 | 4 | Record grain, nullable roles/references, identity/cast failures |
+| Catalog | 27 | 10 | Exact values, fanout, empty input, coverage/key/cast failures; task 6.8 array-container failures/recovery |
+| Release trends | 39 | 13 | UTC boundaries/timezones, dated/undated counts, all invariant failures |
+| Genre/platform performance | 21 | 7 | Exact metrics, empty input, repeated pairs, every-column/cast failures |
+| Company output | 27 | 9 | Exact roles/counts, empty input, multiplicity, every-column/cast failures |
+| Full-project schema configuration | Previously repeated in every setup | 3 additional cases | All models/tests, precedence, independent schemas, fresh/cached parity |
+
+Optimization reduced dbt cases from 192 to 67; task 6.8 adds one array-container
+scenario, bringing the current total to 68. The 15 ingestion integration cases
+and 450 offline cases are unchanged. The 128 removed executions were repeats of the
+same 64 scenarios under two extra schema modes. Those full Cartesian combinations
+are no longer tested: configuration resolution is covered by dedicated complete
+builds, while each data edge case runs under the primary configuration. No distinct
+behavior scenario, assertion, malformed value, or deliberate failure was removed.
+Historical task sections below retain their original counts and commands.
+
+`run_dbt` enables partial parsing within one test's artifact directory. Caches are
+never shared between tests or schemas; fresh schema-mode builds explicitly disable
+partial parsing. Subsequent invocations can avoid parsing unchanged files, as
+supported by [dbt's parsing contract](https://docs.getdbt.com/reference/parsing).
+`dbt-invocations.jsonl` beside each test's target/log directories records command,
+selectors, parse mode, return code and elapsed seconds, without environment values
+or credentials. Use `--durations=25` to see pytest setup/call costs; a caller-owned
+external `--basetemp` directory can retain all timings for analysis.
+
+See [test-harness optimization verification](#test-harness-optimization-verification)
+for before/after timings, exact commands, scope, and preservation checks.
+
+These tests never call IGDB. HTTP requests in the test process are rejected, and dbt usage reporting is disabled in subprocesses. Live API smoke checks remain separate. The suite does not prove source completeness, real network acknowledgment loss, server-crash durability, or production-wide data quality. `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` are views: a successful view build does not evaluate their casts for every raw row. The catalog table evaluates the expressions it projects, but not all unprojected staging fields. The integration tests explicitly query staging output using known fixtures; the dbt key tests inspect raw and staging identifiers, not all scalar casts.
 
 ## Current Python unit tests
 
@@ -1948,3 +1999,1485 @@ Add database/dbt CI only when the repository can provision the required service 
 - Do not test implementation details when observable behavior is sufficient.
 - Every bug fix should add a regression test when practical.
 - New ingestion entities should reuse shared test patterns but still test entity-specific queries/contracts.
+
+## Task 6.1 game-genre relationship verification
+
+Verified September 30, 2026. Only task 6.1 was implemented. `int_game_genres` is a view over `stg_games` at distinct BIGINT `(game_id, genre_id)` grain. Lateral JSONB expansion normalizes whole-array JSON null to SQL NULL; absent/null/empty arrays emit zero rows. Duplicate pairs collapse after casting. No genre lookup join removes unmatched IDs, and no genre reference-existence or positivity tests are imposed. Null members remain visible to `not_null`; malformed non-null arrays/members fail on evaluation. See the [complete contract](../pipeline/DBT_TRANSFORMATIONS.md#int_game_genres-task-61).
+
+Added two offline SQL/YAML contract cases and fifteen opt-in PostgreSQL cases under explicit, legacy, and explicit-over-legacy source-schema settings with independent disposable `DBT_SCHEMA`. Checks cover exact types/values, missing/null/empty arrays, duplicate/reused/large/zero IDs, incomplete genre coverage, malformed values, model/column documentation, and intentional composite-grain/null-key failures with recovery. The existing staging corruption checks now select source/staging tests explicitly so their expected failures remain independent of the new dependent bridge; all earlier coverage is retained.
+
+Exact commands from the repository root, in validation order:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow offline checks: 13 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_staging_tests.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py
+# Narrow offline checks with the new model: 15 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_genres.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py
+# New relationship database cases: 15 passed, 36 deselected.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k game_genres
+# Full default suite: 431 passed, 66 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Affected staging failure/recovery checks: 6 passed, 45 deselected.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k staging_identifier
+# Full enabled suite: 497 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing-data build, exact-row comparisons, raw/history preservation, cleanup check.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task61/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task61/check_docs.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task61/check_preservation.py
+git diff --check
+```
+
+The existing-data harness uses environment-backed settings without overrides and disables dbt usage reporting. Its dbt invocation is:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task61/existing-dbt/target --log-path /private/tmp/data-platform-task61/existing-dbt/logs
+```
+
+Result: **six views built, 23 dbt tests passed**, with six model descriptions and 37 documented columns matching the manifest and actual view columns. All five rows in each staging view still match raw records. `analytics.int_game_genres` exactly matches the 11 distinct pairs from these existing arrays:
+
+| Game ID | Stored genre array | Output genre IDs |
+|---|---|---|
+| 1 | `[5, 13, 31]` | 5, 13, 31 |
+| 2 | `[13, 31]` | 13, 31 |
+| 3 | `[5, 13, 31]` | 5, 13, 31 |
+| 4 | `[5, 31]` | 5, 31 |
+| 5 | `[12]` | 12 |
+
+Eight pairs reference genre IDs 12, 13, or 31 absent from the independently bounded genre table; all eight survive. Both existing source/output schemas remain `analytics`. No ingestion, settings change, migration, data clearing, or watermark reset was needed. The only dbt configuration warning is the expected unused marts path.
+
+All tests passed on their first runs. The initial sandboxed service start returned launchctl bootstrap exit 5; retry outside the sandbox succeeded, and localhost readiness reported accepting connections before database work. Database tests/build ran outside the network sandbox. SHA-256 hashes of all five raw tables (five rows each) and 21 ingestion-run records matched before tests, before the build, and after the build. No disposable schemas existed initially or remained after verification. Each fixture dropped only its own schemas. PostgreSQL was stopped/unregistered afterward: Running/Loaded/Schedulable all false; final readiness exit 2/no response.
+
+Baseline hashes of 153 files, the existing-data harness/results, and preservation/link check scripts are under `/private/tmp/data-platform-task61`; `.env` was hashed without copying its contents. dbt targets/logs stayed outside the repository. The two pre-existing uncommitted edits (`.env.example`, `.gitignore`), raw archives, `.env`, and all 26 previously reported tracked generated/local artifacts remain unchanged. Nothing was committed, deleted, or untracked. Documentation link/anchor checks and `git diff --check` passed.
+
+Task-only files created: `dbt/models/intermediate/int_game_genres.sql`, `dbt/models/intermediate/schema.yml`, `dbt/tests/int_game_genres_unique_pair.sql`, and `tests/test_dbt_int_game_genres.py`. Files modified: `tests/integration/test_dbt_postgres.py`, `docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`, `docs/engineering/DATA_QUALITY.md`, and this page. Only roadmap checkbox 6.1 changed.
+
+The offline tests inspect SQL/YAML contracts; actual row semantics are evaluated by the opt-in PostgreSQL tests. Passing this build does not prove full IGDB/genre coverage, and absent/null/empty arrays do not establish that a game has no real-world genres. Existing limitations of unrelated staging casts remain; genre members are evaluated by the bridge's tests. At that point no task 6.2 or later model was implemented; task 6.2 verification follows below.
+
+## Task 6.2 game-platform relationship verification
+
+Verified September 30, 2026. Only task 6.2 was implemented. `int_game_platforms` follows the existing genre bridge as a view over `stg_games`, at distinct BIGINT `(game_id, platform_id)` grain. Lateral expansion normalizes whole-array JSON null; absent/null/empty arrays emit zero rows. Duplicate members collapse after casting, including castable integer strings. Unmatched platform IDs survive independently bounded ingestion without a lookup join or reference-existence test. Null members remain visible to `not_null`; malformed non-null arrays/members raise on evaluation. The genre SQL is unchanged. See the [platform contract](../pipeline/DBT_TRANSFORMATIONS.md#int_game_platforms-task-62).
+
+Two offline cases check SQL lineage/expansion/grain and YAML model/column descriptions and tests. The genre documentation test now selects its own model by name in the shared YAML, retaining its assertions. Fifteen new PostgreSQL cases cover all three source-schema modes with independent disposable output schemas: exact values/types/grain, absent/null/empty arrays, duplicate/reused/large/zero/negative IDs, integer-string casts, incomplete reference coverage, malformed inputs, deliberate pair/key defects, and recovery. Correcting invalid source input and restoring deliberately broken views each returns all three platform tests to passing. Existing genre/staging and ingestion coverage remains intact.
+
+Exact commands from the repository root:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow offline: 15 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_genres.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py
+# Record configured raw/history hashes before database tests.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task62/snapshot_database.py
+# Updated narrow offline: 17 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_platforms.py tests/test_dbt_int_game_genres.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py tests/test_dbt_stg_games.py
+# New PostgreSQL cases: 15 passed, 51 deselected.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k game_platforms
+# Full default: 433 passed, 81 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Full enabled: 514 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing-data build, all staging/bridge comparisons, preservation, schema cleanup.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task62/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task62/check_docs.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task62/check_preservation.py
+git diff --check
+```
+
+The existing-data harness loads existing environment-backed settings without overrides, disables dbt usage reporting, and executes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task62/existing-dbt/target --log-path /private/tmp/data-platform-task62/existing-dbt/logs
+```
+
+Result: **seven views built, 26 dbt tests passed** (ten source, ten staging, six bridge). All seven model descriptions and 39 documented columns match the manifest and actual view columns. Every staging value still matches the five stored rows per source; the genre bridge still matches all 11 source-array pairs. The platform bridge matches exactly 14 distinct pairs:
+
+| Game ID | Stored platform array | Output platform IDs |
+|---|---|---|
+| 1 | `[6]` | 6 |
+| 2 | `[6]` | 6 |
+| 3 | `[11, 6]` | 6, 11 |
+| 4 | `[9, 48, 6, 14, 12, 49]` | 6, 9, 12, 14, 48, 49 |
+| 5 | `[3, 6, 39, 14]` | 3, 6, 14, 39 |
+
+Eight platform pairs reference IDs 9, 11, 12, 14, 39, 48, or 49 absent from the bounded platform table; all survive. Existing raw/output schemas remain `analytics`. No ingestion, schema migration, data clearing, or watermark reset was needed. Only the expected unused marts configuration warning remains.
+
+The initial sandboxed service start returned launchctl bootstrap exit 5; the same command outside the sandbox succeeded, and localhost readiness confirmed accepting connections before database work. All tests passed on their first runs. Database validation ran outside the network sandbox. Hashes of all five raw tables (five rows each) and 21 ingestion-run records matched before tests, before the build, and after the build. No disposable schemas existed initially or remained afterward; fixtures drop only their own schemas. PostgreSQL was stopped/unregistered afterward: Running/Loaded/Schedulable all false, final readiness exit 2/no response.
+
+Baseline snapshots/hashes of 157 files, verification scripts/results, and a task-only diff are under `/private/tmp/data-platform-task62`. `.env` was hashed without copying its contents. dbt artifacts stayed outside the repository. Existing uncommitted changes, raw archives, `.env`, and all 26 previously reported tracked artifacts were preserved; nothing was committed, removed, or untracked. Documentation links/anchors and `git diff --check` passed.
+
+Created: `dbt/models/intermediate/int_game_platforms.sql`, `dbt/tests/int_game_platforms_unique_pair.sql`, and `tests/test_dbt_int_game_platforms.py`. Modified: `dbt/models/intermediate/schema.yml`, `tests/test_dbt_int_game_genres.py`, `tests/integration/test_dbt_postgres.py`, `docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`, `docs/engineering/DATA_QUALITY.md`, and this page. Only roadmap checkbox 6.2 changed; task 6.3 and later remain open.
+
+Offline tests inspect contracts; PostgreSQL cases establish actual row behavior. The bounded sample does not establish full platform coverage, and zero bridge rows do not prove a game has no platform associations. Successful builds still do not validate unrelated staging scalar casts; existing explicit staging-read checks remain in place.
+
+## Task 6.3 game-company relationship verification
+
+Verified September 30, 2026. The grain was documented before implementation:
+`int_game_companies` is a five-column view over `stg_involved_companies`, one row
+per `involved_company_id`. Distinct records sharing a game/company pair remain
+separate, including identical role values. Raw upserts handle versions of one ID;
+this model does not deduplicate. Nullable references and independent nullable
+BOOLEAN roles pass through; both true, both false, and unknown are valid. Only
+record identity has `unique`/`not_null` tests. No reference-existence, reciprocal
+array, positivity, required-reference, or role-exclusivity rule was added. See the
+[complete contract](../pipeline/DBT_TRANSFORMATIONS.md#int_game_companies-task-63).
+
+Two offline cases protect lineage/projection and complete YAML documentation with
+record-grain tests. Twelve opt-in PostgreSQL cases cover three source-schema modes
+(explicit, legacy, explicit-over-legacy) with independent disposable `DBT_SCHEMA`:
+actual view types, exact values, all nine true/false/NULL role combinations,
+repeated pairs with differing and identical roles, missing/JSON-null/partially
+null references, large/zero/negative and castable string references, accepted
+BOOLEAN strings, unmatched references, and records absent from games' arrays.
+Malformed non-null references/roles raise on evaluation and corrected rows recover.
+Deliberate duplicate/NULL output identifiers each produce exactly one specific dbt
+test failure, then both tests pass after restoring the view. All earlier staging,
+genre/platform, ingestion, and schema-precedence checks are retained. The only
+changes to existing test logic are build/model/test counts for the added model.
+
+Exact commands from the repository root, in validation order:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow offline: 16 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_platforms.py tests/test_dbt_int_game_genres.py tests/test_dbt_stg_involved_companies.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py
+# Read-only raw/history snapshot before database tests.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task63/snapshot_database.py
+# Updated narrow offline: 18 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_companies.py tests/test_dbt_int_game_platforms.py tests/test_dbt_int_game_genres.py tests/test_dbt_stg_involved_companies.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py
+# New PostgreSQL cases: 12 passed, 66 deselected.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k game_companies
+# Full default: 435 passed, 93 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Full enabled: 528 passed.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing-data build, all staging/relationship comparisons, preservation, schema cleanup.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task63/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task63/check_docs.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task63/check_preservation.py
+git diff --check
+```
+
+The existing-data harness loads `.env` without overrides, disables usage reporting,
+and invokes dbt with external artifacts:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task63/existing-dbt/target --log-path /private/tmp/data-platform-task63/existing-dbt/logs
+```
+
+Result: **eight views built and 28 dbt tests passed** (ten source, ten staging,
+eight relationship). All eight model descriptions and 44 column descriptions
+match the manifest and actual view columns. Every staging value still matches
+its five stored source rows, and genre/platform outputs still match all 11/14
+source-array pairs. The new model exactly matches these raw and staged records:
+
+| involved_company_id | game_id | company_id | developer | publisher |
+|---|---|---|---|---|
+| 2 | 38 | 1 | false | true |
+| 6 | 2 | 3 | true | false |
+| 7 | 2 | 4 | false | true |
+| 8 | 38 | 7 | true | false |
+| 9 | 37 | 11 | true | false |
+
+Records 2, 8, and 9 have unloaded game and/or company references and all survive.
+Existing source/output schemas remain `analytics`. No ingestion, migration,
+data clearing, watermark reset, or settings change was needed. Only the expected
+unused marts configuration warning remains; no task 6.4 or later model was added.
+
+All test runs passed on their first execution. The initial sandboxed service
+start failed with launchctl bootstrap exit 5; the same command outside the sandbox
+succeeded. The sandboxed readiness probe reported no response; the explicit
+localhost check outside the sandbox confirmed accepting connections before database
+work. Database checks/build ran outside the network sandbox. Hashes of all five
+raw tables (five rows each) and the 21 ingestion-run records matched before tests,
+before the existing-data build, and after it. No disposable schemas existed
+initially or remained afterward. Fixtures drop only their own schemas, including
+after deliberate failures. PostgreSQL was stopped/unregistered afterward:
+Running/Loaded/Schedulable all false, readiness exit 2/no response.
+
+Baseline hashes/copies of 160 files, verification scripts/results, and a task-only
+diff are under `/private/tmp/data-platform-task63`; `.env` was hashed without
+copying its contents. All unrelated baseline hashes match, including earlier
+uncommitted changes, `.env`, raw archives, and the 26 previously reported tracked
+artifacts. dbt targets/logs stayed outside the repository. Nothing was committed,
+deleted, untracked, or migrated. Documentation link/anchor and whitespace checks
+passed. Only roadmap checkbox 6.3 changed; 6.4 and later remain open.
+
+Created: `dbt/models/intermediate/int_game_companies.sql` and
+`tests/test_dbt_int_game_companies.py`. Modified:
+`dbt/models/intermediate/schema.yml`, `tests/integration/test_dbt_postgres.py`,
+`docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
+`docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`,
+`docs/engineering/DATA_QUALITY.md`, and this page. No prior relationship SQL or
+source/staging contracts changed; no dependency was added.
+
+Offline tests inspect contracts; PostgreSQL cases establish evaluated row
+semantics. The local bounded sample has developer-only/publisher-only records;
+synthetic fixtures verify repeated pairs and the other nullable role combinations.
+Identifier tests and a view build do not validate every reference/role cast or
+prove source completeness. Explicit output reads supply that value check here.
+
+## Task 6.4 game catalog verification
+
+The eleven-column catalog contract was documented before implementation in
+[dbt transformations](../pipeline/DBT_TRANSFORMATIONS.md#mart_game_catalog-task-64).
+`mart_game_catalog` follows the configured marts table materialization and has
+exactly one row per staged game. Eight scalar columns pass through unchanged;
+three ordered JSONB arrays expose observed genres, platforms, and company
+relationship records with available names. Independent aggregation before left
+joins prevents fanout. Bridge pairs retain their existing duplicate semantics;
+company records retain identity, repeated pairs, nullable references, and all
+independent nullable role combinations. No completeness, ranking, positivity,
+reciprocal-array, required-reference, or role-exclusivity policy was introduced.
+
+Three offline cases protect curated lineage/materialization, the exact documented
+projection, identity-only column tests, and bidirectional game coverage. The 27
+new PostgreSQL cases cover actual types/materialization/documentation, exact values,
+all optional/null/empty cases, large counts, negative/zero IDs and epochs,
+cast-normalized duplicates, duplicate labels, numeric ordering, incomplete lookups,
+repeated company records, all nine nullable role combinations, non-reciprocal
+record membership, fanout, table snapshot/rebuild behavior, and empty staged games.
+Independent Python grouping compares every catalog value with staging and
+relationship models. Four deliberate output defects (duplicate, NULL, missing,
+extra game IDs) assert exact dbt failures and recover by rebuilding. Three malformed
+projected inputs (rating, genre array, company role) fail materialization, retain
+the previous table, and recover after source correction. All destructive fixture
+operations are confined to disposable test schemas.
+
+Existing staging/relationship SQL and tests remain intact. The shared build fixture
+now expects nine models and 31 dbt tests. Staging corruption checks retain their
+original twenty source/staging assertions with `--indirect-selection cautious`,
+which excludes the new coverage test because its catalog parent is not selected.
+Explicit, legacy, and explicit-over-legacy source precedence and independent
+`DBT_SCHEMA` are exercised by every new database scenario.
+
+Commands from the repository root, in execution order:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow offline: 19 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_companies.py tests/test_dbt_int_game_platforms.py tests/test_dbt_int_game_genres.py tests/test_dbt_stg_games.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py
+# Read-only raw/history hashes before database tests.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task64/snapshot_database.py
+# Updated narrow offline: 22 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_game_catalog.py tests/test_dbt_int_game_companies.py tests/test_dbt_int_game_platforms.py tests/test_dbt_int_game_genres.py tests/test_dbt_stg_games.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py
+# Narrow database: 33 passed, 72 deselected (27 catalog + six staging defect cases).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k 'game_catalog or staging_identifier'
+# Full default: 438 passed, 120 skipped (ran while narrow database checks finished).
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+```
+
+Remaining verification commands, after the narrow database run finished:
+
+```bash
+# Full enabled: 558 passed in 639.96 seconds.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing-data build, all model comparisons, raw/history preservation, schema cleanup.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task64/verify_existing_dbt.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task64/check_preservation.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task64/check_docs.py
+git diff --check
+```
+
+The existing-data harness loads existing `.env` settings without overrides,
+disables dbt usage reporting, and invokes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task64/existing-dbt/target --log-path /private/tmp/data-platform-task64/existing-dbt/logs
+```
+
+Result: **eight views, one table, and 31 passing dbt tests** (ten source, ten
+staging, eight relationship, three catalog); no build warnings/errors/skips.
+All nine models and 55 column descriptions match the manifest and actual database
+columns. Every staging value still matches its five raw source rows; genre/platform
+bridges match all 11/14 source-array pairs; all five company records match raw and
+staged relationships. The catalog has exactly game IDs 1–5, with every scalar and
+ordered JSONB object equal to independently grouped source-model values:
+
+| game_id | Observed genre objects | Observed platform objects | Observed company record IDs |
+|---|---|---|---|
+| 1 | 3 | 1 | `[]` |
+| 2 | 2 | 1 | `[6, 7]` |
+| 3 | 3 | 2 | `[]` |
+| 4 | 2 | 6 | `[]` |
+| 5 | 1 | 4 | `[]` |
+
+All eight unmatched genre and eight unmatched platform references survive with
+JSON null names. Company records 2, 8, and 9 reference unloaded games and remain
+in `int_game_companies`; they do not invent catalog games. Game 2 carries record
+6/company 3/Looking Glass Studios (developer true, publisher false) and record
+7/company 4/Eidos Interactive (developer false, publisher true). Empty company
+arrays on the other four games reflect bounded observations only.
+
+All test runs passed on their first execution. Service startup/readiness and
+database tests/build ran outside the network sandbox, with startup succeeding
+and readiness confirmed before database access. Existing raw/output schemas stay
+`analytics`; no ingestion, migration, data clearing, watermark reset, or settings
+change was needed. SHA-256 hashes of all five raw tables and ingestion history
+matched before tests, before the existing-data build, and afterward. No disposable
+schemas existed initially or remained after the suite/build. Fixtures cleaned
+only their own schemas, including after deliberate failures. PostgreSQL was
+restored to stopped/unregistered: Running/Loaded/Schedulable all false; final
+readiness returned exit 2/no response.
+
+Baseline hashes cover 162 files; 154 are unchanged and eight task files were
+modified. The four new files are listed below. Existing `.env` (hashed without
+copying), `.env.example`, `.gitignore`, raw archives, earlier relationship work,
+and all 26 previously reported tracked generated/local artifacts were preserved.
+Verification scripts, results, task-only diff, and baseline copies/hashes are under
+`/private/tmp/data-platform-task64`; dbt artifacts stayed outside the repository.
+Nothing was committed, deleted from the repository, or untracked. Documentation
+links/anchors and whitespace checks passed. Only roadmap checkbox 6.4 changed.
+
+Task-only files created:
+
+- `dbt/models/marts/mart_game_catalog.sql`
+- `dbt/models/marts/schema.yml`
+- `dbt/tests/mart_game_catalog_game_coverage.sql`
+- `tests/test_dbt_mart_game_catalog.py`
+
+Task-only files modified: `tests/integration/test_dbt_postgres.py`,
+`docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
+`docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`,
+`docs/engineering/DATA_QUALITY.md`, and this page. No source/staging/relationship
+SQL or dependencies changed; at that point tasks 6.5 and later remained unimplemented.
+
+The catalog is a table snapshot: rebuild after ingestion. Its arrays describe
+observations in stored data and cannot prove complete IGDB coverage or real-world
+absence. Company array lengths count relationship records, not distinct companies.
+Nullable ratings/counts are descriptive values, without ranking thresholds.
+The build evaluates catalog expressions, not every unused staging cast.
+
+## Task 6.5 annual release trends verification
+
+The two-column contract was documented before implementation in
+[dbt transformations](../pipeline/DBT_TRANSFORMATIONS.md#mart_release_trends-task-65).
+`mart_release_trends` uses the configured table materialization in independent
+`DBT_SCHEMA`, directly over game-grain `stg_games`. Each row counts dated games
+in one observed UTC calendar year of their game-level first release instant.
+Explicit `AT TIME ZONE 'UTC'` prevents session-timezone drift. No relationship
+joins, date cutoffs, platform/region expansion, or later-roadmap metrics were added.
+NULL dates are excluded without implying unreleased games; unobserved years are
+omitted without implying real-world absence. Summed counts plus undated games
+reconcile to all staged games at the same snapshot. Zero/negative epochs retain
+the existing staging cast behavior; malformed non-NULL timestamps fail evaluation.
+
+Three offline cases protect lineage, UTC extraction, the two-column YAML contract,
+materialization, and declared invariants. Thirty-nine new opt-in PostgreSQL cases
+run under explicit, legacy, and explicit-over-legacy source-schema settings with
+independent output schemas. They check exact types, manifest documentation, grain,
+multiple games per year, multiple years, omitted intervening years, missing/JSON-null
+dates, empty/all-undated input, zero/negative/castable-string epochs, future dates,
+relationship multiplicities, table snapshot/rebuild behavior, and independent
+Python UTC grouping/reconciliation. Each schema mode rebuilds under UTC,
+America/Los_Angeles, and Asia/Tokyo sessions around UTC new-year boundaries.
+
+Five dbt tests require unique/non-NULL year, non-NULL count, positive count, and
+exact yearly reconciliation. Nine deliberate defects cover duplicate/NULL years,
+NULL/zero/negative/wrong counts, missing/extra years, and a shifted year preserving
+the total. Each asserts exact failed-test names and violation counts, then rebuilds
+and requires all five tests to pass. Invalid non-NULL release input also fails
+materialization, preserves the previous table, and recovers after source correction.
+Only disposable schemas are modified by these negative cases.
+
+Existing staging, relationship, and catalog SQL remains unchanged. The catalog's
+offline test now locates its model by name in the shared YAML, retaining every
+contract assertion. Shared database fixture totals now expect ten models and
+36 dbt tests. Source precedence, independent output schema, cautious staging-test
+selection, and all earlier assertions remain intact.
+
+Exact commands from the repository root, in validation order:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow offline: 16 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_game_catalog.py tests/test_dbt_stg_games.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py
+# Read-only baseline raw/history hashes; no disposable schemas initially.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task65/snapshot_database.py
+# Updated narrow offline: 19 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_release_trends.py tests/test_dbt_mart_game_catalog.py tests/test_dbt_stg_games.py tests/test_dbt_staging_tests.py tests/test_dbt_sources.py
+# Narrow PostgreSQL: 45 passed, 99 deselected in 366.11s (0:06:06) (39 release-trend + six staging defect cases).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k 'release_trends or staging_identifier' > /private/tmp/data-platform-task65/narrow-postgres.log 2>&1
+# Full default, while narrow database checks ran: 441 passed, 159 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider
+# Existing-data build and comparisons after narrow checks.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task65/verify_existing_dbt.py > /private/tmp/data-platform-task65/existing-build.log 2>&1
+# Full enabled: 600 passed in 964.79s (0:16:04).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task65/full-postgres.log 2>&1
+```
+
+The existing-data harness loads `.env` without overrides, disables dbt usage
+reporting, and invokes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task65/existing-dbt/target --log-path /private/tmp/data-platform-task65/existing-dbt/logs
+```
+
+Result: **eight views, two tables, and 36 passing dbt tests** (ten source,
+ten staging, eight relationship, three catalog, five release-trend), without
+warnings/errors/skips. All ten models and 57 column descriptions match the manifest
+and actual database columns. All existing staging/raw and relationship/source
+comparisons pass; the five catalog games and every scalar/relationship object
+still match. Independent Python UTC grouping of staging and catalog dates agrees
+exactly with the new mart:
+
+| release_year | release_count |
+|---|---|
+| 1998 | 2 |
+| 2000 | 1 |
+| 2004 | 1 |
+| 2014 | 1 |
+
+The stored sample has five dated games and zero undated games: 5 + 0 = 5 staged
+and raw games. Other years are omitted. Existing raw/output schemas remain
+`analytics`; no ingestion, migration, data clearing, watermark reset, or settings
+change was needed.
+
+All test runs passed on their first execution. Service startup/readiness and
+database work ran outside the network sandbox. Raw/history SHA-256 hashes matched
+before tests, before/after the existing-data build, and after the full suite.
+No disposable schemas existed initially or remained afterward; fixtures dropped
+only their own schemas, including after deliberate failures. PostgreSQL was
+restored to stopped/unregistered: Running/Loaded/Schedulable all false and final
+readiness exit 2/no response.
+
+Final verification commands:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task65/final_database_check.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task65/check_preservation.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task65/check_docs.py
+git diff --check
+```
+
+Baseline hashes cover 166 files: 156 unchanged and ten task files modified, plus
+four new task files. Existing uncommitted work, `.env` (hashed without copying),
+raw archives, and all 26 previously reported tracked generated/local artifacts
+are preserved. No file was removed/untracked and nothing was committed.
+Baseline copies/hashes, logs, verification scripts/results, and a task-only diff
+are in `/private/tmp/data-platform-task65`; dbt artifacts stayed outside the
+repository. Documentation links/anchors and whitespace checks pass.
+
+Task-only files created:
+
+- `dbt/models/marts/mart_release_trends.sql`
+- `dbt/tests/mart_release_trends_positive_count.sql`
+- `dbt/tests/mart_release_trends_yearly_reconciliation.sql`
+- `tests/test_dbt_mart_release_trends.py`
+
+Task-only files modified: `dbt/models/marts/schema.yml`,
+`tests/test_dbt_mart_game_catalog.py`, `tests/integration/test_dbt_postgres.py`,
+`docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
+`docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`,
+`docs/engineering/DATA_QUALITY.md`, and this page. Only checkbox 6.5 changed;
+6.6 and later remain unchecked. No dependency was added.
+
+The mart is a table snapshot: rebuild after ingestion before reconciling to current
+staging. Counts describe stored observations, not complete IGDB coverage or verified
+real-world releases/absence. Unknown release dates do not classify unreleased games.
+The local sample's undated behavior is supplemented by synthetic missing/null and
+all-undated cases. Identifier tests still do not validate unrelated staging casts.
+
+## Task 6.6 genre/platform performance verification
+
+The seven-column contracts, lineage and metric semantics were written before SQL
+implementation in [dbt transformations](../pipeline/DBT_TRANSFORMATIONS.md#genreplatform-performance-task-66).
+Two independent table marts group by observed dimension ID, deduplicate bridge
+pairs before joining games, and attach labels afterward. Five descriptive metrics
+cover observed games, non-NULL rating contributors, unweighted mean rating,
+non-NULL rating-count contributors, and summed supplied rating counts. No weighting,
+ranking, threshold, range filter, forecasting, or company-output work was added.
+Unloaded/unnamed references survive; unobserved loaded dimensions are omitted.
+Missing associations and labels have distinct meanings. NULL metrics remain
+separate from supplied zero, and total_rating remains untouched in staging/catalog.
+
+Six new offline cases protect lineage, independent aggregation, deduplication,
+materialization, the exact documented projection, NULL policy, and reconciliation
+of every column. Twenty-one new opt-in PostgreSQL cases exercise all three
+source-schema modes and independent output schemas. They check actual column types,
+manifest documentation, exact grain/metrics, multiple games and dimensions,
+repeated source IDs/cast-normalized array IDs, duplicate labels, unmatched IDs,
+missing/empty names, missing/null/zero/negative/decimal values, large IDs/counts,
+empty/unassociated input, omitted dimensions, snapshot/rebuild behavior, and
+source-array/bridge reconciliation. Python sets and Decimal arithmetic independently
+check the evaluated metrics, including PostgreSQL's NUMERIC result precision.
+
+Three dbt tests per mart declare unique/non-NULL ID and exact reconciliation.
+The deliberate failure case corrupts each non-key column on its own observed row:
+each of the five metrics is independently set to NULL, negative, zero, and wrong
+positive values; two labels change to non-NULL values. It also deletes an observed
+ID, adds an unobserved ID, adds a NULL ID, and duplicates a valid ID. Exact test
+names/counts and the reconciliation query's returned IDs prove all independent
+defects are detected: 25 reconciliation rows plus one unique and one not-null
+violation per mart. Rebuild restores all six tests. A separate test doubles both
+bridge views and proves every mart value is unchanged, then restores the views.
+Invalid projected ratings/counts fail materialization, preserve previous tables,
+and recover after correcting disposable fixture input. Cleanup runs on failures.
+
+Existing tests retain their assertions. The shared build fixture now expects
+12 models and 42 tests, and eight bridge-test invocations use
+`--indirect-selection cautious` to isolate their three bridge invariants from the
+new downstream reconciliation tests. Existing staging, relationship, catalog and
+release SQL and contracts remain unchanged. Source precedence and independent DBT_SCHEMA behavior
+are preserved. All dbt artifacts are external; no ingestion was needed.
+
+Commands from the repository root, in validation order:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task66/snapshot_database.py
+# Baseline narrow offline: 10 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_release_trends.py tests/test_dbt_mart_game_catalog.py tests/test_dbt_int_game_genres.py tests/test_dbt_int_game_platforms.py
+# Updated narrow offline: 16 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_performance.py tests/test_dbt_mart_release_trends.py tests/test_dbt_mart_game_catalog.py tests/test_dbt_int_game_genres.py tests/test_dbt_int_game_platforms.py
+# Narrow database: 27 passed, 138 deselected in 209.28s (0:03:29).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k 'performance or staging_identifier' > /private/tmp/data-platform-task66/narrow-postgres.log 2>&1
+# Full default: 447 passed, 180 skipped in 1.94s (while narrow database checks ran).
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task66/full-default.log 2>&1
+# Existing-data build and exact comparisons after narrow database checks.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task66/verify_existing_dbt.py > /private/tmp/data-platform-task66/existing-build.log 2>&1
+# Initial full enabled run exposed bridge test selection: 10 failed, 39 passed;
+# gracefully interrupted at 216.35s, preserving its log as full-postgres-initial.log.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task66/full-postgres.log 2>&1
+# After adding cautious bridge selection: 10 narrow offline passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_performance.py tests/test_dbt_int_game_genres.py tests/test_dbt_int_game_platforms.py
+# Post-interruption check: raw/history hashes unchanged; no disposable schemas remain.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task66/final_database_check.py
+# Affected bridge PostgreSQL checks: 30 passed, 135 deselected in 214.83s (0:03:34).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k 'game_genres or game_platforms' > /private/tmp/data-platform-task66/bridge-regression.log 2>&1
+# Final full enabled: 627 passed in 1128.15s (0:18:48).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task66/full-postgres.log 2>&1
+```
+
+The existing-data harness loads existing `.env` settings without overrides,
+disables dbt usage reporting, and invokes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task66/existing-dbt/target --log-path /private/tmp/data-platform-task66/existing-dbt/logs
+```
+
+Result: **eight views, four tables, and 42 passing dbt tests** (ten source, ten
+staging, eight relationship, three catalog, five release-trend, six performance).
+All twelve models and 71 column descriptions match the manifest and actual
+relations. Every earlier raw/staging/relationship/catalog/release comparison still
+passes. Exact performance rows, including labels and all five metrics, match
+independent Python grouping of staged values and distinct bridge pairs; bridge
+pairs also match raw arrays. The local sample has four observed genres and nine
+observed platforms. Summed game counts are 11 and 14 respectively across five
+distinct games, demonstrating why these dimensions must not be summed as a game
+population. Detailed rows follow; NULL names are retained for unloaded references.
+
+`mart_genre_performance`:
+
+| ID | name | game_count | rated_game_count | avg_rating | rating_count_game_count | rating_count_sum |
+|---|---|---|---|---|---|---|
+| 5 | Shooter | 3 | 3 | 79.1826865173220867 | 3 | 639 |
+| 12 | NULL | 1 | 1 | 85.2566825387958900 | 1 | 353 |
+| 13 | NULL | 3 | 3 | 84.6839715428176767 | 3 | 468 |
+| 31 | NULL | 4 | 4 | 80.9887674409246850 | 4 | 815 |
+
+`mart_platform_performance`:
+
+| ID | name | game_count | rated_game_count | avg_rating | rating_count_game_count | rating_count_sum |
+|---|---|---|---|---|---|---|
+| 3 | Linux | 1 | 1 | 85.2566825387958900 | 1 | 353 |
+| 6 | PC (Microsoft Windows) | 5 | 5 | 81.8423504604989260 | 5 | 1168 |
+| 9 | NULL | 1 | 1 | 69.9031551352457100 | 1 | 347 |
+| 11 | NULL | 1 | 1 | 81.7086974474386500 | 1 | 133 |
+| 12 | NULL | 1 | 1 | 69.9031551352457100 | 1 | 347 |
+| 14 | NULL | 2 | 2 | 77.5799188370208000 | 2 | 700 |
+| 39 | NULL | 1 | 1 | 85.2566825387958900 | 1 | 353 |
+| 48 | NULL | 1 | 1 | 69.9031551352457100 | 1 | 347 |
+| 49 | NULL | 1 | 1 | 69.9031551352457100 | 1 | 347 |
+
+The initial full run exposed a test-selection regression: dbt's eager indirect
+selection added performance reconciliation to bridge-only test invocations,
+violating their existing three-test assertions. Ten cases failed before a graceful
+interrupt (39 passed). `--indirect-selection cautious` isolates the existing bridge
+assertions, matching the established staging-test approach. The affected bridge
+checks and final full suite pass after that repair; production model SQL was not
+changed. Fixture cleanup completed after the interruption and hashes still matched.
+Initial failure details are retained in `full-postgres-initial.log`.
+
+Service startup/readiness and database work ran outside the network sandbox. Raw/history SHA-256 hashes matched
+before tests, before/after the existing-data build, and after the full suite.
+No disposable schemas existed initially or remained afterward. Fixtures dropped
+only their own schemas. PostgreSQL was restored to stopped/unregistered:
+Running/Loaded/Schedulable all false, and readiness exit 2/no response.
+
+Final verification commands:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task66/final_database_check.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task66/check_preservation.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task66/check_docs.py
+git diff --check
+# Final offline run after documentation updates and PostgreSQL shutdown:
+# 447 passed, 180 skipped in 1.85s.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task66/final-default.log 2>&1
+```
+
+Baseline hashes cover 170 files: 161 unchanged and nine task files modified,
+plus five new task files. Existing uncommitted work, `.env` (hashed without copying),
+raw archives, and all 26 previously reported tracked generated/local artifacts
+are preserved. No migration, data clearing, watermark reset, deletion/untracking,
+dependency addition, or commit occurred. Baseline copies, hashes, validation
+scripts/results, external dbt targets/logs and a task-only diff are under
+`/private/tmp/data-platform-task66`. Documentation links/anchors and whitespace
+checks pass. Only roadmap checkbox 6.6 changed; 6.7 and later remain unchecked.
+
+Created: `dbt/models/marts/mart_genre_performance.sql`,
+`dbt/models/marts/mart_platform_performance.sql`,
+`dbt/tests/mart_genre_performance_reconciliation.sql`,
+`dbt/tests/mart_platform_performance_reconciliation.sql`, and
+`tests/test_dbt_mart_performance.py`.
+
+Modified: `dbt/models/marts/schema.yml`, `tests/integration/test_dbt_postgres.py`,
+`docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
+`docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`,
+`docs/engineering/DATA_QUALITY.md`, and this page.
+
+Marts are table snapshots: rebuild after ingestion before reconciliation. These
+summaries describe bounded stored observations; missing associations/dimensions
+are not verified real-world absence. A mean with few rated games is not equally
+reliable as one with many; count context is descriptive and does not establish
+representativeness. Count sums are not unique raters, and cross-dimension totals
+repeat multi-associated games. Local-data missing-value coverage is supplemented
+by synthetic fixtures. No unrelated staging cast validation is claimed.
+
+## Task 6.7 company-output verification
+
+The coverage decision and nine-column contract were documented before SQL in
+[dbt transformations](../pipeline/DBT_TRANSFORMATIONS.md#mart_company_output-task-67).
+Five existing relationship records reference five company IDs and three games;
+two company IDs and two game IDs are unloaded. This supports bounded observed
+output without additional ingestion. The table groups non-NULL company IDs,
+retains unmatched references and missing/empty labels, distinguishes records from
+distinct games, and exposes company/game loading context. Explicit true on any
+record qualifies its non-NULL game for a role; NULL remains unknown. Role counts
+can overlap, including across conflicting records. NULL-company records remain
+upstream for reconciliation; loaded companies without observations are omitted.
+
+Three offline cases protect lineage, materialization, grouping/join boundaries,
+exact column documentation and independent reconciliation. Twenty-seven new opt-in
+PostgreSQL cases exercise all three source-schema modes and independent DBT_SCHEMA.
+Exact rows/types/manifest descriptions are checked alongside multiple games per
+company, multiple companies per game, all nine nullable role combinations in
+isolation and on repeated pairs, identical/differing role records, duplicate raw
+record IDs and company labels, missing/empty names, NULL/unloaded references,
+zero/negative/BIGINT-limit IDs, unobserved companies, empty/NULL-company input,
+and table snapshot/rebuild behavior. Python sets independently reconcile every
+mart value with raw, staged and relationship records.
+
+The three dbt invariants are unique/non-NULL company ID and exact bidirectional
+reconciliation of all nine columns. Deliberate corruption changes each of the six
+count columns independently to NULL, negative, zero and a wrong positive value;
+two label and two company-loaded defects are also isolated on separate observed
+IDs. Missing/extra/NULL IDs and a duplicated ID prove population/key checks.
+The tests assert every reconciliation violation (31 rows) and exact failed test
+names/counts, then rebuild and require all three tests to pass. Doubled bridge
+records and game/company lookups prove distinct-game metrics cannot inflate,
+while upstream identifier checks still reject duplicates; restoration recovers.
+Four malformed projected reference/role inputs fail materialization, preserve the
+previous table, and recover after fixture correction. All mutations use disposable
+schemas; existing raw data is never changed by fixtures.
+
+Only shared fixture model/test totals and four existing company-bridge dbt test
+invocations changed in earlier tests. Cautious indirect selection retains their
+two original identity assertions without selecting downstream reconciliation.
+Staging/genre/platform selection and every earlier model contract remain intact.
+The first focused run was gracefully interrupted after five passing tests in
+52.00 seconds to load that selection adjustment. Its log is retained; cleanup and
+raw/history hashes passed before restarting. No test failure prompted this restart.
+
+Exact commands from the repository root, in validation order:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+# Readiness: accepting connections before database work.
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Baseline narrow offline: 11 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_int_game_companies.py tests/test_dbt_mart_performance.py tests/test_dbt_mart_game_catalog.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task67/snapshot_database.py
+# Updated narrow offline: 14 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_company_output.py tests/test_dbt_int_game_companies.py tests/test_dbt_mart_performance.py tests/test_dbt_mart_game_catalog.py
+# Focused PostgreSQL: 45 passed, 147 deselected in 370.08s (0:06:10) (27 new plus 12 company bridge and six staging cases).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k 'company_output or game_companies or staging_identifier' > /private/tmp/data-platform-task67/narrow-postgres.log 2>&1
+# Full default: 450 passed, 207 skipped in 1.99s.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task67/full-default.log 2>&1
+# Existing-data build, exact comparisons, preservation and schema-cleanup checks.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task67/verify_existing_dbt.py > /private/tmp/data-platform-task67/existing-build.log 2>&1
+# Full enabled: 657 passed in 1417.90s (0:23:37).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task67/full-postgres.log 2>&1
+```
+
+The existing-data harness loads `.env` without overrides, disables usage reporting,
+and invokes:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task67/existing-dbt/target --log-path /private/tmp/data-platform-task67/existing-dbt/logs
+```
+
+Result: **eight views, five mart tables and 45 passing dbt tests** (ten source,
+ten staging, eight relationship, three catalog, five release-trend, six performance,
+three company-output). Thirteen models and 80 columns have nonempty descriptions
+matching the manifest and actual database columns. All earlier raw/staging,
+relationship, catalog, release and performance comparisons pass. Every company
+mart value matches independently grouped source records:
+
+| company_id | name | company_loaded | relationship_record_count | null_game_relationship_count | game_count | loaded_game_count | developer_game_count | publisher_game_count |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Electronic Arts | true | 1 | 0 | 1 | 0 | 0 | 1 |
+| 3 | Looking Glass Studios | true | 1 | 0 | 1 | 1 | 1 | 0 |
+| 4 | Eidos Interactive | true | 1 | 0 | 1 | 1 | 0 | 1 |
+| 7 | NULL | false | 1 | 0 | 1 | 0 | 1 | 0 |
+| 11 | NULL | false | 1 | 0 | 1 | 0 | 1 | 0 |
+
+Five record counts plus zero NULL-company records reconcile to all five stored
+relationships. Five summed game counts represent distinct company/game pairs,
+not the three distinct game references across companies. Two summed loaded-game
+counts both reference game 2. Loaded companies 2/5 have no observed relationships
+and are omitted without asserting absence. No ingestion, migration, data clearing,
+watermark reset, settings change or dependency addition was needed.
+
+Final commands:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task67/final_database_check.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task67/check_preservation.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task67/check_docs.py
+git diff --check
+# Final default after documentation updates and shutdown: 450 passed, 207 skipped in 2.00s.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider > /private/tmp/data-platform-task67/final-default.log 2>&1
+```
+
+Service startup and database work ran outside the network sandbox. SHA-256 hashes
+of all five raw tables and ingestion history matched before tests, before/after
+the build, and after the full suite. No disposable schemas remained. PostgreSQL
+was restored to stopped/unregistered: Running/Loaded/Schedulable all false and
+readiness exit 2/no response. External dbt artifacts, logs, baseline copies/hashes,
+verification scripts/results and a task-only diff are in
+`/private/tmp/data-platform-task67`. Of 175 baseline files, 166 are unchanged and
+nine task files modified; three files were created. Earlier uncommitted work,
+`.env`, raw archives and all 26 previously reported tracked generated/local files
+are preserved. Nothing was committed, deleted or untracked. Documentation links
+and whitespace checks pass. Only roadmap checkbox 6.7 changed; 6.8 and later remain
+unchecked.
+
+Created: `dbt/models/marts/mart_company_output.sql`,
+`dbt/tests/mart_company_output_reconciliation.sql`, and
+`tests/test_dbt_mart_company_output.py`.
+Modified: `dbt/models/marts/schema.yml`, `tests/integration/test_dbt_postgres.py`,
+`docs/CURRENT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`,
+`docs/pipeline/DBT_TRANSFORMATIONS.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`,
+`docs/engineering/DATA_QUALITY.md`, and this page.
+
+This is a rebuildable table snapshot of bounded observations. Omitted companies,
+zero role counts, missing labels and unloaded references do not establish complete
+catalogs or verified absence. Developer and publisher counts may overlap; neither
+role nor cross-company counts should simply be summed as distinct games. Passing
+these checks does not validate unrelated/unprojected staging casts or source
+completeness. Local coverage is supplemented by synthetic role/null/duplicate cases.
+
+## Test-harness optimization verification
+
+Verified October 2, 2026 as an explicitly requested optimization before task 6.8.
+No roadmap checkbox changed. Production Python, dbt SQL/YAML/profiles, warehouse
+contracts, and all 45 dbt invariants are unchanged. No dependency was added.
+
+The former function-scoped `built_staging` fixture ran a full 13-model/45-test
+build before every dbt case. Its environment fixture multiplied all 64 behavior
+scenarios by three schema modes: 192 initial full builds, or 2,496 model builds
+and 8,640 dbt test executions before scenario-specific work. The recorded 6.7 full
+suite took 1,417.90 seconds (23m 37s), with 657 passing cases.
+
+The optimized setup separates fixture loading from model execution. Each behavior
+case uses fresh source/output schemas, builds five staging views plus explicitly
+marked model ancestors, and retains its original value/failure/recovery assertions.
+Three dedicated full-project cases retain all prior full-build assertions and add
+all-model column documentation checks, independent mart/source comparisons, and
+fresh/cached manifest resolution parity. Every schema case runs all 45 dbt tests
+both after a fresh build and on a subsequent cached invocation. Only repeated
+commands within the same test can reuse parsing; no database or parse cache is
+shared between scenarios. Existing opt-in, HTTP rejection, failure cleanup,
+source-schema precedence and independent DBT_SCHEMA behavior remain intact.
+
+A baseline-to-current AST/collection audit confirms that **all 38 existing test
+function bodies and their non-schema parameter decorators are unchanged**, and
+all 64 distinct behavior cases still collect. Only explicit model-dependency
+markers were added to those functions. Their 128 repeated executions under the
+two alternate schema modes were replaced by three complete configuration cases.
+This intentionally removes the data-edge-case × schema-mode Cartesian product,
+not any distinct edge case. The [coverage matrix](#postgresql-integration-tests)
+maps every family. The 450 offline cases and 15 ingestion database cases remain
+unchanged. Default collection is now 450 offline plus 82 opt-in cases; the full
+enabled suite has 532 cases. Lower case counts reflect reduced repetition.
+
+| Measurement | Before | After |
+|---|---|---|
+| Same 11 primary-schema company/staging scenarios | 91.07s | 66.79s (26.7% less time) |
+| Full enabled suite | 657 passed in 1,417.90s | 532 passed in 358.87s (0:05:58) (74.7% less time) |
+| Default suite | 450 passed, 207 skipped in about 2s | 450 passed, 82 skipped in 1.93s; final check: 450 passed, 82 skipped in 1.83s |
+| Dedicated full-project schema cases | Repeated setup in all 192 cases | 3 passed in 15.94s |
+
+The focused comparison was measured sequentially on the same local environment.
+The full comparison uses the immediately preceding task's recorded run on this
+machine; these are individual observations, not a performance guarantee. The
+optimized full run records 167 dbt CLI calls taking 349.39 seconds in aggregate, with 100 confirmed parse-cache hits. Most remaining wall time is still
+in dbt CLI invocations. No parallel execution or shared mutable fixture was added.
+Failure-case consolidation was unnecessary for this first optimization; all
+existing failure scenarios stay individually diagnosable.
+
+Exact commands from the repository root:
+
+```bash
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-test-optimization/snapshot_database.py
+# Baseline collection: 192 dbt cases; no database execution.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest --collect-only -q -p no:cacheprovider tests/integration/test_dbt_postgres.py > /private/tmp/data-platform-test-optimization/before-collection.txt
+# Baseline representative run: 11 passed, 181 deselected in 91.07s.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/integration/test_dbt_postgres.py -k 'explicit and not explicit_over_legacy and (company_output or staging_identifier)' --durations=20 --junitxml=/private/tmp/data-platform-test-optimization/before-narrow.xml > /private/tmp/data-platform-test-optimization/before-narrow.log 2>&1
+# Updated collection: 67 dbt cases, with strict marker registration.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest --collect-only -q -p no:cacheprovider --strict-markers tests/integration/test_dbt_postgres.py > /private/tmp/data-platform-test-optimization/after-collection.txt
+# Every existing behavior body/parameter combination retained.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-test-optimization/check_coverage.py
+# Narrow offline: 20 passed.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_sources.py tests/test_dbt_staging_tests.py tests/test_dbt_mart_company_output.py tests/test_dbt_mart_performance.py
+# Same representative scenarios after optimization: 11 passed, 56 deselected in 66.79s.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers tests/integration/test_dbt_postgres.py -k 'company_output or staging_identifier' --durations=20 --junitxml=/private/tmp/data-platform-test-optimization/after-narrow.xml > /private/tmp/data-platform-test-optimization/after-narrow.log 2>&1
+# Dedicated full-build/configuration/cache checks: 3 passed, 64 deselected in 15.94s.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers tests/integration/test_dbt_postgres.py -k full_project_schema_modes --durations=10 > /private/tmp/data-platform-test-optimization/schema-modes.log 2>&1
+# Full default: 450 passed, 82 skipped in 1.93s.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers > /private/tmp/data-platform-test-optimization/full-default.log 2>&1
+# Full enabled, retaining per-test and per-dbt-command timing artifacts externally.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 --junitxml=/private/tmp/data-platform-test-optimization/full-postgres.xml --basetemp=/private/tmp/data-platform-test-optimization/full-pytest > /private/tmp/data-platform-test-optimization/full-postgres.log 2>&1
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-test-optimization/analyze_timings.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-test-optimization/final_database_check.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Final offline check after documentation updates and shutdown.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers > /private/tmp/data-platform-test-optimization/final-default.log 2>&1
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-test-optimization/check_preservation.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-test-optimization/check_docs.py
+git diff --check
+```
+
+All test runs passed. Existing raw/history hashes match and no disposable schemas
+remain. PostgreSQL is stopped/unregistered: Running/Loaded/Schedulable all false,
+readiness exit 2/no response. No existing local mart needed rebuilding because
+production models did not change. Database validation built the actual project
+in isolated schemas; no live IGDB access, ingestion, migration, data clearing or
+watermark reset occurred.
+
+Modified only `tests/integration/test_dbt_postgres.py`,
+`tests/integration/conftest.py`, `docs/CURRENT_STATE.md`,
+`docs/engineering/TESTING.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`, and
+`docs/pipeline/DBT_TRANSFORMATIONS.md`. No repository file was created or removed.
+Of 178 baseline files, 172 hashes remain unchanged and six task files changed.
+Existing uncommitted work, `.env`, raw archives and the 26 previously reported
+tracked artifacts are preserved. Nothing was committed or untracked. Baseline
+copies/hashes, coverage mapping, logs/XML, invocation timings, verification scripts
+and a task-only diff are under `/private/tmp/data-platform-test-optimization`.
+Documentation links and whitespace checks pass. Task 6.8 remains unchecked.
+
+## Task 6.8 mart contract audit verification
+
+Verified October 2, 2026. The [coverage matrix](DATA_QUALITY.md#mart-contract-coverage-matrix-task-68)
+links all five marts' documented grain, population and metrics to declared dbt
+invariants, independent integration value checks and unsupported completeness
+claims. All 36 mart columns (80 across all 13 models) retain documented types,
+nullability and meaning. Shared refresh/snapshot and denominator semantics are
+explicit. No production model SQL violated its contract or needed modification.
+
+Existing release/performance/company reconciliations already check every metric,
+label and observed group; their deliberate failures and recovery remain sufficient.
+The catalog's exact scalar/object values, ordering, role/null/reference semantics
+and fanout already have independent integration coverage. One justified gap was
+closed: dbt now checks its three required JSON array containers. The new singular
+`mart_game_catalog_relationship_arrays` test returns one row per invalid game/column,
+using NULL-safe JSON type checking without constraining nullable object values.
+
+One new primary-schema scenario corrupts each container with SQL NULL, JSON null,
+an object and a scalar. It asserts the exact 12 returned game/column pairs, the
+sole failed test name and count, three other passing catalog tests, then recovery
+of all four catalog tests and every source-derived value after rebuilding. Existing
+NULL/extra catalog-row defects now also assert three container violations; all
+previous failure assertions remain. The check depends only on the catalog, so no
+source/staging/relationship selection or cautious-selection change was needed.
+
+The optimized fixtures/cache handling are unchanged. AST comparison confirms all
+existing functions and parameter decorators remain; only catalog expectations and
+full-project totals changed. The suite retains 64 earlier behavior scenarios,
+adds one, keeps three dedicated full-project schema-mode checks, and retains 15
+ingestion cases: **68 dbt / 83 total database cases**, without three-way behavior
+parametrization or unrelated full-project setup. No dependency was added.
+
+Exact commands from the repository root, in validation order (logs/artifacts external):
+
+```bash
+# Baseline and updated narrow offline runs: 15 passed each, 0.08s each.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider tests/test_dbt_mart_game_catalog.py tests/test_dbt_mart_release_trends.py tests/test_dbt_mart_performance.py tests/test_dbt_mart_company_output.py
+/opt/homebrew/bin/brew services run postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+# Accepting connections before snapshot/tests; startup/database work outside network sandbox.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task68/snapshot_database.py
+# Narrow database: 15 passed, 53 deselected in 86.14s.
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers tests/integration/test_dbt_postgres.py -k 'game_catalog or staging_identifier or full_project_schema_modes' > /private/tmp/data-platform-task68/narrow-postgres.log 2>&1
+# Full default: 450 passed, 83 skipped in 1.81s.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers > /private/tmp/data-platform-task68/full-default.log 2>&1
+# Full enabled: 533 passed in 373.86s (0:06:13).
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 --junitxml=/private/tmp/data-platform-task68/full-postgres.xml --basetemp=/private/tmp/data-platform-task68/full-pytest > /private/tmp/data-platform-task68/full-postgres.log 2>&1
+# AST audit passed; collection: 68 dbt cases.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task68/check_coverage.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest --collect-only -q -p no:cacheprovider --strict-markers tests/integration/test_dbt_postgres.py > /private/tmp/data-platform-task68/collection.txt
+# Existing-data build and all independent comparisons passed.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task68/verify_existing_dbt.py > /private/tmp/data-platform-task68/existing-build.log 2>&1
+```
+
+The reused existing-data script loads `.env` without overrides and disables dbt
+usage reporting. It runs this exact build, with all targets/logs external:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -c 'from dbt.cli.main import cli; cli()' build --project-dir /Users/patrick/Desktop/Code/data_platform/dbt --profiles-dir /Users/patrick/Desktop/Code/data_platform/dbt --no-partial-parse --target-path /private/tmp/data-platform-task68/existing-dbt/target --log-path /private/tmp/data-platform-task68/existing-dbt/logs
+```
+
+Result: **eight views, five tables, 46 passing dbt tests** (10 source, 10 staging,
+8 relationship, 4 catalog, 5 release, 6 performance, 3 company-output). All 13 model
+and 80 column descriptions match the manifest and actual database columns. Reused
+Python grouping/set/Decimal helpers independently compare every mart column with
+source models, alongside raw/staging/relationship comparisons:
+
+| Existing mart | Verified result |
+|---|---|
+| Catalog | Five games; all scalar/ordered object values match; 11 genre, 14 platform and two company-record objects |
+| Release trends | 1998: 2; 2000/2004/2014: 1 each; five dated plus zero undated equals five staged games |
+| Genre performance | Four rows; every metric/label matches; summed game counts 11 across five games |
+| Platform performance | Nine rows; every metric/label matches; summed game counts 14 across five games |
+| Company output | Five rows; all nine columns match; two unloaded companies and two distinct unloaded game references retained |
+
+No ingestion was necessary. Raw/output schemas stay on the existing configuration;
+no migration, raw clearing, watermark reset, settings edit or dependency change
+occurred. Every test run passed on its first execution. The 6:13 full-suite run
+retains the optimized harness's approximate six-minute runtime; it is a single
+measurement, not a performance guarantee.
+
+Final verification commands:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Users/patrick/Desktop/Code/data_platform PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task68/final_database_check.py
+/opt/homebrew/bin/brew services stop postgresql@17
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h localhost -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task68/check_preservation.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task68/check_docs.py
+git diff --check
+# Final default after documentation updates and shutdown: 450 passed, 83 skipped.
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers > /private/tmp/data-platform-task68/final-default.log 2>&1
+```
+
+All five raw-table and ingestion-history hashes match the pre-test snapshot;
+no disposable schemas remain. PostgreSQL is stopped/unregistered:
+Running/Loaded/Schedulable all false; readiness exit 2/no response. `.env`, local
+raw archives, previous uncommitted changes and all 26 previously reported tracked
+generated/local artifacts are preserved. Nothing was deleted, untracked or committed.
+The working-tree baseline (copies/hashes plus Git status/diff) is saved under
+`/private/tmp/data-platform-task68-baseline*`; private-file hashes, scripts, logs,
+results, dbt artifacts and `task-only.diff` are in `/private/tmp/data-platform-task68`.
+
+Created: `dbt/tests/mart_game_catalog_relationship_arrays.sql`.
+Modified: `dbt/models/marts/schema.yml`, `tests/integration/test_dbt_postgres.py`,
+`docs/CURRENT_STATE.md`, `docs/ROADMAP.md`, `docs/pipeline/DBT_TRANSFORMATIONS.md`,
+`docs/engineering/DATA_QUALITY.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`, and this
+page. Only roadmap 6.8 is newly checked; Phase 6 is complete and Phase 7/later remain
+unchecked. Architecture and production model SQL are unchanged. The coverage
+matrix records the remaining limits: catalog element values/order are protected
+by integration checks, reconciliation needs refreshed snapshots/stable sources,
+and bounded observations cannot establish source completeness or real-world absence.
+
+## Task 7.1 Docker PostgreSQL validation
+
+October 2, 2026 initial attempt: configuration verified; runtime was blocked.
+The [Colima follow-up](#task-71-colima-runtime-follow-up) records resolution and
+subsequent runtime results.
+The audit found only `docker/.gitkeep`, no Docker/Compose executables on PATH,
+no Docker Desktop/Colima/Podman/OrbStack installation in standard locations, and
+no standard Docker socket. Native Homebrew PostgreSQL was stopped/unregistered
+(Running/Loaded/Schedulable false, readiness exit 2) and was never started.
+
+A working-tree baseline, copies of tracked/untracked source files, Git diffs,
+and hashes of `.env`, local raw archives, generated/private files and the stopped
+native cluster were saved under `/private/tmp/data-platform-task71-8mo40vcm`.
+Secrets were hashed only. The 26 previously reported tracked generated/local
+artifacts remain untouched. No Python, dbt, dependency, test-harness, `.env`, or
+index changes were made.
+
+For daemon-independent checks, the official standalone [Compose v5.6.0](https://github.com/docker/compose/releases/tag/v5.6.0) ARM64
+binary was downloaded to that temporary directory and verified against the GitHub
+release asset SHA-256. No engine or system package was installed. The external
+`check_compose.py` invokes real Compose with `--env-file /dev/null`, a distinct
+project name, and synthetic credentials held in process memory:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task71-8mo40vcm/check_compose.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers --basetemp=/private/tmp/data-platform-task71-8mo40vcm/default-pytest > /private/tmp/data-platform-task71-8mo40vcm/default.log 2>&1
+git diff --check
+```
+
+Results: quiet config validation passed; six unset/empty database/user/password
+cases were rejected; default/overridden host ports and literal secret rendering
+passed; changing the project name selected a distinct volume. No resolved
+credentials were printed or saved. The first checker run incorrectly expected
+unescaped dollar signs in serialized JSON; adjusting the checker for Compose's
+`$$` serialization made all ten checks pass without changing the service.
+The default suite passed **450, with 83 skipped, in 1.78s**; whitespace checks passed.
+No static configuration-text test or new dependency was added. Runtime persistence
+is the meaningful acceptance test and remains pending below.
+
+Read-only Docker Hub registry inspection of `postgres:17.11-bookworm` verified
+Linux ARM64 support, `PG_MAJOR=17`, `PG_VERSION=17.11-1.pgdg12+2`,
+`PGDATA=/var/lib/postgresql/data`, the matching declared volume, port 5432,
+`docker-entrypoint.sh`, `postgres`, and `SIGINT`. The observed manifest-list digest
+was `sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652`;
+the ARM64 manifest was `sha256:75731e2765e7d0c8bb7dea960ef3bdcde68d16314991ab2057a2a74ea0fff257`.
+Metadata is retained in `image-metadata.json`; no image layers were downloaded.
+The committed tag is version-specific, not digest-pinned. See the linked official
+image sources in [local development](LOCAL_DEVELOPMENT.md#docker-postgresql-task-71).
+
+With synthetic database/user/password exports, `POSTGRES_PORT=55471`, and
+`DOCKER_HOST=unix:///var/run/docker.sock`, the actual startup attempt was:
+
+```bash
+/private/tmp/data-platform-task71-8mo40vcm/docker-compose --env-file /dev/null -p data-platform-task71-8mo40vcm -f /Users/patrick/Desktop/Code/data_platform/compose.yaml up -d --wait --wait-timeout 120 postgres
+```
+
+It exited **1**: the Docker API socket did not exist. No container, network, volume,
+or disposable schema was created, so no Docker resource cleanup was needed.
+**Health transitions, authenticated SQL access, marker persistence across container
+removal/recreation, shutdown behavior, and the full enabled integration suite were
+not verified.** The earlier task 6.8 result of 533 passes is not Docker evidence.
+No IGDB calls or native database writes occurred.
+
+Final preservation checks:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task71-8mo40vcm/check_preservation.py
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h 127.0.0.1 -p 5432
+git diff --check
+```
+
+Of 1,503 baseline file hashes, 1,497 remain identical and only six authorized
+documentation files changed; `compose.yaml` is the sole new repository file.
+The native cluster files, `.env`, raw archives, integration harness, model files,
+private/generated artifacts, Git index and roadmap checkboxes are unchanged.
+Native service flags remain false; readiness returns exit 2/no response.
+The operation examples parse with `bash -n` and their relative links resolve.
+The baseline comparison is saved as `task-only.diff` beside scripts and logs.
+Nothing was committed, deleted or untracked.
+
+### Repeatable isolated runtime procedure
+
+Run only after Docker is available. This procedure uses an independently named
+disposable project and high host port, never the normal project volume or native
+cluster. Execute from the repository root in a dedicated Bash shell. Stop if the
+chosen port is occupied and choose a free port; do not stop an unrelated service.
+The trap removes only resources owned by this fresh validation project, including
+its disposable volume. Normal development uses `down` **without** `--volumes`.
+
+```bash
+set -e
+docker info > /dev/null
+TASK71_DIR=$(mktemp -d /private/tmp/data-platform-task71-runtime.XXXXXX)
+TASK71_PROJECT="data-platform-task71-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=55471
+export POSTGRES_DB=task71_validation POSTGRES_USER=task71_validation
+export POSTGRES_RAW_SCHEMA=raw DBT_SCHEMA=analytics
+export PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5
+TASK71_PYTHON=/private/tmp/data-platform-phase1-venv/bin/python
+POSTGRES_PASSWORD=$("$TASK71_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')
+export POSTGRES_PASSWORD
+dc71() { docker compose --env-file /dev/null -p "$TASK71_PROJECT" -f compose.yaml "$@"; }
+test -z "$(dc71 ps --all --quiet)"
+if docker volume inspect "${TASK71_PROJECT}_postgres_data" > /dev/null 2>&1; then
+    echo 'Validation volume already exists; choose another project.'
+    exit 1
+fi
+trap 'dc71 down --volumes; unset POSTGRES_PASSWORD' EXIT
+dc71 config --quiet
+dc71 up -d --wait --wait-timeout 120 postgres
+dc71 ps
+
+cat > "$TASK71_DIR/probe.py" <<'PY'
+import os
+import sys
+import psycopg
+
+with psycopg.connect(host=os.environ['POSTGRES_HOST'], port=os.environ['POSTGRES_PORT'],
+                     dbname=os.environ['POSTGRES_DB'], user=os.environ['POSTGRES_USER'],
+                     password=os.environ['POSTGRES_PASSWORD'], connect_timeout=5) as conn:
+    assert conn.execute('SELECT current_database(), current_user').fetchone() == (
+        os.environ['POSTGRES_DB'], os.environ['POSTGRES_USER'])
+    if sys.argv[1] == 'seed':
+        conn.execute('CREATE SCHEMA task71_probe')
+        conn.execute('CREATE TABLE task71_probe.marker (value text PRIMARY KEY)')
+        conn.execute('INSERT INTO task71_probe.marker VALUES (%s)', ('task71-persistent-marker',))
+    else:
+        assert conn.execute('SELECT value FROM task71_probe.marker').fetchall() == [
+            ('task71-persistent-marker',)]
+        if sys.argv[1] == 'cleanup':
+            assert not conn.execute(
+                "SELECT nspname FROM pg_namespace WHERE starts_with(nspname, 'test_dp_')"
+            ).fetchall(), 'Integration schemas remain; inspect before cleanup'
+            conn.execute('DROP SCHEMA task71_probe CASCADE')
+print('Authenticated database/marker check passed:', sys.argv[1])
+PY
+
+"$TASK71_PYTHON" "$TASK71_DIR/probe.py" seed
+TASK71_OLD_CONTAINER=$(dc71 ps --quiet postgres)
+test -n "$TASK71_OLD_CONTAINER"
+dc71 down
+test -z "$(dc71 ps --all --quiet)"
+docker volume inspect --format '{{.Name}}' "${TASK71_PROJECT}_postgres_data"
+dc71 up -d --wait --wait-timeout 120 postgres
+TASK71_NEW_CONTAINER=$(dc71 ps --quiet postgres)
+test -n "$TASK71_NEW_CONTAINER"
+test "$TASK71_OLD_CONTAINER" != "$TASK71_NEW_CONTAINER"
+"$TASK71_PYTHON" "$TASK71_DIR/probe.py" read
+# Also exercise stop/start; this alone would not prove replacement persistence.
+dc71 stop postgres
+test -z "$(dc71 ps --status running --quiet)"
+dc71 up -d --wait --wait-timeout 120 postgres
+"$TASK71_PYTHON" "$TASK71_DIR/probe.py" read
+
+RUN_POSTGRES_INTEGRATION=0 "$TASK71_PYTHON" -m pytest -q -p no:cacheprovider --strict-markers --basetemp="$TASK71_DIR/default"
+RUN_POSTGRES_INTEGRATION=1 "$TASK71_PYTHON" -m pytest -q -p no:cacheprovider --strict-markers --durations=25 --basetemp="$TASK71_DIR/enabled"
+"$TASK71_PYTHON" "$TASK71_DIR/probe.py" cleanup
+dc71 down --volumes
+test -z "$(dc71 ps --all --quiet)"
+if docker volume inspect "${TASK71_PROJECT}_postgres_data" > /dev/null 2>&1; then
+    echo 'Disposable volume cleanup failed.'
+    exit 1
+fi
+trap - EXIT
+unset POSTGRES_PASSWORD
+/opt/homebrew/bin/brew services info postgresql@17
+# Expect exit 2/no response; native PostgreSQL must remain stopped/unregistered.
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h 127.0.0.1 -p 5432 || test "$?" -eq 2
+```
+
+Record the two different container IDs, retained volume, successful marker reads,
+suite results and final cleanup before checking off 7.1. The optimized
+harness must retain its structure: 65 behavior scenarios, three full-project schema
+checks, and 15 ingestion cases. It creates/cleans its own schemas, writes dbt
+artifacts beneath the external pytest directory, and rejects live HTTP requests.
+The marker uses its own schema and is committed before container removal. None
+of this procedure initializes or migrates the project's real raw data/history.
+
+### Task 7.1 Colima runtime follow-up
+
+The user selected Colima and requested the engine fix and proper testing.
+Installed ARM Homebrew packages without upgrading existing formulae, dependent
+packages, or invoking automatic cleanup:
+
+```bash
+HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 /opt/homebrew/bin/brew install --dry-run colima docker docker-compose
+HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_UPGRADE=1 /opt/homebrew/bin/brew install --no-ask colima docker docker-compose
+```
+
+Installed Colima 0.10.3, Lima 2.2.0, Docker CLI 29.8.1 and Compose 5.5.1.
+Created a new private `~/.config/data-platform/docker/config.json` with the
+Homebrew Compose plugin directory; the existing Docker configuration/credentials
+were retained byte-for-byte. No Docker Desktop helper or global socket change was
+needed. The named VM was created with:
+
+```bash
+PATH="/opt/homebrew/bin:$PATH" DOCKER_CONFIG=/Users/patrick/.config/data-platform/docker /opt/homebrew/bin/colima start data-platform --vm-type vz --runtime docker --cpus 2 --memory 2 --disk 10 --mount none --ssh-config=false --activate=false
+```
+
+The engine listens at `~/.colima/data-platform/docker.sock`. Validation explicitly
+selects it with `DOCKER_HOST` and the separate `DOCKER_CONFIG`; it does not depend
+on a default Docker context or `/var/run/docker.sock`. No host directory is mounted
+into this VM. No Homebrew service/login startup was enabled. See [daily shell
+setup and shutdown](LOCAL_DEVELOPMENT.md#colima-on-this-mac).
+
+The first Docker run passed health, correct-password access, incorrect-password
+rejection, marker persistence after container removal/recreation, stop/start,
+and the default suite (**450 passed, 83 skipped in 1.85s**). The full enabled run
+reported **532 passed, 1 failed in 370.69s**. The failure was the timezone test's
+secondary connection: `ConnectionInfo.dsn` omits the password, so it raised
+`fe_sendauth: no password supplied`. This matches [Psycopg's documented contract](https://www.psycopg.org/psycopg3/docs/api/objects.html#psycopg.ConnectionInfo.dsn).
+The test now passes `connection.info.password` explicitly when reconnecting.
+This is the only test change; production Python/model SQL, scenario counts,
+optimized setup and schema-mode coverage are unchanged. The original task baseline
+preserves the earlier uncommitted test edits. No password is written to logs.
+
+The failing run cleaned its disposable project/volume in `finally`. A fresh retry
+project repeats lifecycle validation, runs the affected case first, then runs both
+full suites. Scripts, logs, dbt artifacts, and structured evidence remain external:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task71-runtime-k5bp26ak/check_compose.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task71-runtime-k5bp26ak/validate_runtime.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task71-runtime-k5bp26ak/retry/validate_runtime.py
+```
+
+The installed Compose passes all ten narrow configuration checks. The corrected
+timezone test passes (**1 passed in 8.28s**), and the retry default suite passes
+**450 with 83 skipped in 1.85s**. The full enabled suite passes **533 in 374.61s
+(6:14)**. Each of the three full-project schema checks built all 13 models with
+80 documented columns and passed all 46 dbt tests. All 65 behavior scenarios and
+15 ingestion cases remain; no per-scenario full-project setup or three-way behavior
+parametrization was introduced.
+
+The retry script supplies explicit host `127.0.0.1`, port `55471`, database/user
+`task71_validation`, raw/output schemas `raw`/`analytics`, and a generated password
+held only in memory. With those connection exports, its exact pytest invocations
+were:
+
+```bash
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 --basetemp=/private/tmp/data-platform-task71-runtime-k5bp26ak/retry/narrow-pytest tests/integration/test_dbt_postgres.py::test_release_trends_values_utc_grain_and_reconciliation
+RUN_POSTGRES_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 --basetemp=/private/tmp/data-platform-task71-runtime-k5bp26ak/retry/default-pytest
+RUN_POSTGRES_INTEGRATION=1 PYTHONDONTWRITEBYTECODE=1 PGCONNECT_TIMEOUT=5 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 --basetemp=/private/tmp/data-platform-task71-runtime-k5bp26ak/retry/enabled-pytest
+```
+
+Persistence evidence for project `data-platform-task71-k5bp26ak-retry`:
+
+- Server: PostgreSQL `17.11 (Debian 17.11-1.pgdg12+2)`, Docker Engine 29.5.2.
+- Container `26026f53b23c` became healthy, accepted the intended login/database,
+  rejected an incorrect password, and committed a synthetic marker.
+- `compose down` removed that container; inspecting its old ID failed as expected.
+  The volume `data-platform-task71-k5bp26ak-retry_postgres_data` remained.
+- `compose up -d --wait --wait-timeout 120 postgres` created a different container,
+  `b5136777208c`. Its only mount was that named volume at `/var/lib/postgresql/data`.
+  The authenticated host connection read back the exact committed marker.
+- `compose stop postgres` left no running project container; a subsequent `up`
+  became healthy and retained the marker again. This supplements the actual
+  removal/recreation proof.
+- After the suites, no integration schemas remained. The probe schema was dropped,
+  then project-scoped `down --volumes` removed only the retry resources. Checks
+  confirmed no project container, network, or volume remained. The failed first
+  run likewise removed its own project resources.
+
+Full IDs, exact Compose commands, return codes, mounts, and SQL/persistence assertions
+are recorded in `retry/runtime-evidence.json`. All artifacts remain beneath
+`/private/tmp/data-platform-task71-runtime-k5bp26ak`. No live IGDB request, real-data
+ingestion, native database write, migration, watermark reset, or model change occurred.
+
+Final shutdown and preservation commands:
+
+```bash
+PATH="/opt/homebrew/bin:$PATH" DOCKER_CONFIG=/Users/patrick/.config/data-platform/docker /opt/homebrew/bin/colima stop data-platform
+PATH="/opt/homebrew/bin:$PATH" DOCKER_CONFIG=/Users/patrick/.config/data-platform/docker /opt/homebrew/bin/colima list
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/bin/brew services info colima
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h 127.0.0.1 -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task71-runtime-k5bp26ak/check_completion.py
+git diff --check
+```
+
+Colima is stopped, and both Homebrew services remain stopped/unregistered. The
+native PostgreSQL readiness check returns exit 2/no response. Of 1,503 original
+baseline file hashes, 1,496 are unchanged; six documentation files and the single
+integration-test correction account for all differences. `.env`, native cluster
+files, raw archives/history, generated/private artifacts and the Git index are
+preserved. The original Docker client config hash also matches. All other integration
+test bodies and fixtures are identical to the saved baseline. Installed tools and
+the stopped VM/cached image remain available for future sessions.
+
+Task-only repository changes: new `compose.yaml`; modified `docs/CURRENT_STATE.md`,
+`docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/engineering/LOCAL_DEVELOPMENT.md`,
+this page, `docs/pipeline/RAW_STORAGE.md`, and `tests/integration/test_dbt_postgres.py`.
+The cumulative review diff is `task-only.diff` in the runtime work directory;
+the original before-task copies remain in `/private/tmp/data-platform-task71-8mo40vcm`.
+Only **7.1** is newly checked; **7.2 and later remain unchecked**. No commit was made.
+
+## Task 7.2 shared-image validation
+
+Verified October 2, 2026. Only image packaging, its context checks and documentation
+changed. Production Python, model SQL/YAML, `requirements.txt`, `compose.yaml`,
+all existing tests and the optimized harness remain byte-for-byte unchanged from
+the task baseline. Task-only additions: `.dockerignore`, `docker/Dockerfile`,
+`docker/validate_image.py`. Modified documentation: `CURRENT_STATE.md`,
+`ARCHITECTURE.md`, `ROADMAP.md`, `LOCAL_DEVELOPMENT.md`, this page and
+`pipeline/DBT_TRANSFORMATIONS.md`. Only roadmap item **7.2** is newly checked.
+
+Evidence and before-task copies are in
+`/private/tmp/data-platform-task72-0ipfun00` (private directory). `baseline.diff`,
+`baseline-status.txt`, `baseline/`, and file-hash manifests preserve the prior
+uncommitted work. `task-only.diff` compares against that working-tree baseline,
+not HEAD. No commit or index cleanup was performed; the previously reported
+26 tracked generated/raw artifacts remain intact.
+
+The official Python tag manifest includes ARM64 and AMD64. Registry inspection:
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+export DOCKER_CONFIG="$HOME/.config/data-platform/docker"
+export DOCKER_HOST="unix://$HOME/.colima/data-platform/docker.sock"
+unset DOCKER_CONTEXT
+colima start data-platform --activate=false
+docker manifest inspect python:3.11.16-slim-bookworm
+docker build -f docker/Dockerfile -t data-platform-runtime:task72 .
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_image.py data-platform-runtime:task72
+```
+
+The final build succeeds. Base index digest:
+`sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b`;
+ARM64 manifest: `sha256:bbc491ed39611eede47b1058ad4afb9ea957fb3bf4a7f1b442c6a5628ab93bdc`.
+Final runtime image ID:
+`sha256:c02c6ae1dc6f9161c998e44556cde467b2a66cba6cfde0352c04e01f15d3dfc0`.
+The [official Python Dockerfile](https://github.com/docker-library/python/blob/master/3.11/slim-bookworm/Dockerfile)
+uses Debian Bookworm slim. The repository selects the version tag rather than
+pinning an immutable digest, consistent with the existing database image policy.
+Actual execution was Linux ARM64; AMD64 execution was not tested.
+
+No dependency specification changed and no upgrade command was used. Fresh
+installation resolves the existing bounded ranges; `dependencies.log` records
+all resolved packages. Verified: Python 3.11.16, dbt Core 1.12.5,
+dbt-postgres 1.11.0, Psycopg 3.3.6, pytest 8.4.2, requests 2.34.2 and
+python-dotenv 1.2.4. Some patch/transitive versions differ from the older host
+venv (for example python-dotenv 1.2.3); the project still has no dependency lock.
+No compiler or additional OS package was needed. `pip check` reports no broken
+requirements. The installed Docker CLI lacks buildx, so `docker build` used its
+working legacy builder and emitted a deprecation notice. No tooling installation
+or configuration change was needed; this simple Dockerfile uses no builder-specific
+features.
+
+The committed `docker/validate_image.py` suite passes **3 checks**: nested synthetic
+exclusion sentinels, the actual repository build context plus byte-for-byte image
+source parity/non-root execution, and offline default CLI help. Its scratch probe
+images/containers are uniquely named and removed in cleanup. Initial checks exposed
+extra placeholder files, then missing nested source files while tightening patterns;
+the final `.dockerignore` passes both synthetic and real-context assertions.
+The final context contains 94 intended project files. Existing `.env`, Git,
+virtual environments, raw archives, private docs, caches and generated dbt files
+are excluded before copying, not deleted in a later image layer.
+
+An additional external layer audit passes for **11 layers / 14,633 files**,
+including all 94 project files. Every project file matches its source; excluded
+project paths are absent, actual IGDB credential values are absent from every
+layer and image configuration, and the image sets no source/database credentials.
+The audit never prints secret values and removes its temporary image archive.
+No build arguments or build secrets were supplied.
+
+These exact offline smoke commands also pass:
+
+```bash
+docker run --rm --network none data-platform-runtime:task72 python --version
+docker run --rm --network none data-platform-runtime:task72 dbt --version
+docker run --rm --network none data-platform-runtime:task72 python -m pip check
+docker run --rm --network none data-platform-runtime:task72 dbt parse --no-partial-parse
+```
+
+The runtime driver also runs explicit `python -m src.ingestion.run_ingestion
+--help`, `dbt --help`, and package metadata checks without network access. The dbt
+version command reports installed versions and an expected inability to query
+PyPI for the latest release when networking is disabled.
+
+The full validation driver was executed with:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task72-0ipfun00/validate_runtime.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task72-0ipfun00/audit_layers.py
+```
+
+It creates only network `data-platform-task72-0ipfun00-net` (`--internal`) and a
+named disposable `postgres:17.11-bookworm` container, alias `postgres`, with
+`--tmpfs /var/lib/postgresql/data:rw`. It creates no persistent volume, exposes
+no host port and mounts no host path. Database/user are `task72_validation`;
+the random password lives in driver memory and runtime container environment.
+It is passed using `-e POSTGRES_PASSWORD`, never a literal command argument or log.
+Authenticated connections use explicit `postgres:5432`, database/user, password,
+`POSTGRES_RAW_SCHEMA=raw`, and `DBT_SCHEMA=analytics`.
+
+Exact test commands (the driver supplies those exported values):
+
+```bash
+docker run --name data-platform-task72-0ipfun00-default --network none \
+  -e PYTHONDONTWRITEBYTECODE=1 -e PGCONNECT_TIMEOUT=5 -e RUN_POSTGRES_INTEGRATION=0 \
+  data-platform-runtime:task72 python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=25 --basetemp=/tmp/default
+
+docker run --name data-platform-task72-0ipfun00-narrow --network data-platform-task72-0ipfun00-net \
+  -e PYTHONDONTWRITEBYTECODE=1 -e PGCONNECT_TIMEOUT=5 -e RUN_POSTGRES_INTEGRATION=1 \
+  -e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER \
+  -e POSTGRES_PASSWORD -e POSTGRES_RAW_SCHEMA -e DBT_SCHEMA \
+  data-platform-runtime:task72 python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=25 --basetemp=/tmp/narrow \
+  tests/integration/test_dbt_postgres.py::test_release_trends_values_utc_grain_and_reconciliation
+
+docker run --name data-platform-task72-0ipfun00-enabled --network data-platform-task72-0ipfun00-net \
+  -e PYTHONDONTWRITEBYTECODE=1 -e PGCONNECT_TIMEOUT=5 -e RUN_POSTGRES_INTEGRATION=1 \
+  -e POSTGRES_HOST -e POSTGRES_PORT -e POSTGRES_DB -e POSTGRES_USER \
+  -e POSTGRES_PASSWORD -e POSTGRES_RAW_SCHEMA -e DBT_SCHEMA \
+  data-platform-runtime:task72 python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=25 --basetemp=/tmp/enabled
+```
+
+Results: default **450 passed / 83 skipped in 1.31s**; narrow **1 passed in 5.98s**;
+full enabled **533 passed in 275.40s (4:35)**. All 65 dbt behavior scenarios,
+three full-project schema checks and 15 ingestion integration cases remain.
+Each schema mode verifies thirteen models, 80 documented columns and all 46 dbt
+tests, including fresh/cached parsing. No test contacted IGDB: the default suite
+had no network, the enabled suite had only the internal database network, the
+existing HTTP rejection fixture remained enabled, and dbt telemetry was disabled.
+This is synthetic-fixture integration validation, not task 7.5's live pipeline run.
+
+`docker cp` retained each suite's `/tmp/<suite>` beneath the external evidence
+directory before removing its container. `commands.json` records every driver
+command without password values. PostgreSQL reports no remaining `test_dp_%`
+schemas after the suite. Cleanup removes only the named task containers/internal
+network; scratch probes and the superseded first runtime image were removed.
+The final shared image and base/build cache remain available. There were no
+existing Docker containers or volumes at baseline, and none remain after cleanup;
+only Docker's built-in networks remain. No blanket pruning was used.
+
+Shutdown and preservation verification:
+
+```bash
+colima stop data-platform
+colima list
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/bin/brew services info colima
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h 127.0.0.1 -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task72-0ipfun00/check_completion.py
+git diff --check
+```
+
+Colima is stopped. Both Homebrew services report Running/Loaded/Schedulable false;
+native PostgreSQL readiness returns exit 2/no response. All 1,330 external file
+hashes match (native cluster, original `~/.docker` files and Git index).
+Of 203 baseline repository files, only the six intended documentation files
+changed; `.env`, archives, tracked artifacts, production/test code and earlier
+uncommitted work are preserved. The three new task files account for all additions.
+All dbt artifacts remain outside the repository. Tasks **7.3–7.5 remain unchecked**;
+no runtime Compose service, bootstrap, live ingestion, Airflow or Streamlit was added.

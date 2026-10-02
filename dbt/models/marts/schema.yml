@@ -1,0 +1,191 @@
+version: 2
+
+models:
+  - name: mart_release_trends
+    description: >-
+      Annual table snapshot with one row per observed UTC calendar year of
+      stg_games.first_release_at. Counts dated games once each, without relationship
+      joins or platform/regional release expansion. NULL dates are excluded, not
+      interpreted as unreleased games. Unobserved years are omitted, not zero-filled;
+      empty or entirely undated input yields no rows. Bounded observations do not
+      prove complete coverage or real-world absence. Rebuild after ingestion.
+      Summed counts (zero for an empty table) plus undated staged games reconcile
+      to the full staged game population at the same source snapshot.
+    columns:
+      - name: release_year
+        description: >-
+          Required unique INTEGER calendar year of the game-level first release
+          instant, explicitly extracted in UTC regardless of session timezone.
+          Valid zero/negative Unix epochs are preserved; no date cutoff is imposed.
+        data_tests:
+          - unique
+          - not_null
+      - name: release_count
+        description: >-
+          Required positive BIGINT count of staged games with a non-NULL
+          first_release_at in this UTC year, one contribution per game. Counts
+          games, not relationship rows, regional/platform releases, or load events.
+        data_tests:
+          - not_null
+  - name: mart_game_catalog
+    description: >-
+      Exploration table with exactly one row per staged game, including games with
+      no optional values or observed relationships. Rebuilt by dbt; ratings and
+      counts pass through without thresholds or defaults. Each relationship array
+      is aggregated independently before left joining to games, preventing fanout.
+      Empty arrays mean no observed rows in bounded stored data, not verified
+      absence of real-world associations; nonempty arrays do not prove completeness.
+      Rebuild after ingestion. Array containers are required and tested as JSON
+      arrays; exact scalar/object values and ordering have integration coverage.
+    columns:
+      - name: game_id
+        description: "BIGINT staged game identifier; required, unique, and covering every staged game."
+        data_tests:
+          - unique
+          - not_null
+      - name: name
+        description: "Nullable TEXT staged game name, including unchanged empty strings."
+      - name: slug
+        description: "Nullable TEXT staged game slug, including unchanged empty strings."
+      - name: first_release_at
+        description: "Nullable TIMESTAMPTZ staged game-level first release instant, not a platform/region release."
+      - name: rating
+        description: "Nullable NUMERIC staged IGDB rating, without rounding, filtering, or defaults."
+      - name: rating_count
+        description: "Nullable BIGINT staged IGDB rating count; zero and NULL remain distinct."
+      - name: total_rating
+        description: "Nullable NUMERIC staged IGDB total rating, without rounding, filtering, or defaults."
+      - name: total_rating_count
+        description: "Nullable BIGINT staged IGDB total rating count; zero and NULL remain distinct."
+      - name: observed_genres
+        description: >-
+          Non-NULL JSONB array of objects with genre_id (BIGINT) and name (nullable
+          TEXT), ordered by numeric genre_id ascending. One object per distinct
+          int_game_genres pair; duplicate source IDs collapse after bridge casts.
+          Unmatched IDs survive with JSON null names; empty names remain empty.
+          [] means no observed pairs, including absent/null/empty source arrays,
+          not verified absence or complete source coverage.
+      - name: observed_platforms
+        description: >-
+          Non-NULL JSONB array of objects with platform_id (BIGINT) and name
+          (nullable TEXT), ordered by numeric platform_id ascending. One object per
+          distinct int_game_platforms pair; duplicate source IDs collapse after
+          bridge casts. Unmatched IDs survive with JSON null names; empty names
+          remain empty. [] means no observed pairs, including absent/null/empty
+          source arrays, not verified absence or complete source coverage.
+      - name: observed_company_relationships
+        description: >-
+          Non-NULL JSONB array of objects with involved_company_id (BIGINT),
+          company_id (nullable BIGINT), name (nullable TEXT), developer and publisher
+          (independent nullable BOOLEANs), ordered by numeric involved_company_id
+          ascending. One object per int_game_companies record matching this game;
+          distinct records with identical companies/roles remain separate.
+          Membership follows the record's game_id, not games' involved_company_ids.
+          Unmatched/NULL company references survive with JSON null names; empty
+          names remain empty. Unknown references/roles are JSON null, never false.
+          Both roles true or false are valid. [] means no observed records for this
+          staged game, not verified absence or complete source coverage. Records
+          for NULL/unloaded games remain in the intermediate model only.
+  - name: mart_genre_performance
+    description: >-
+      Table snapshot with one row per observed genre_id associated with staged games.
+      Distinct game/ID pairs contribute once per dimension; independent aggregation
+      prevents genre/platform/company fanout. Group by IDs, never labels. Unmatched
+      references and unnamed dimensions survive a left label join; dimensions with
+      no observed games are omitted. Missing/null/empty associations create no
+      unknown bucket. Bounded observations do not establish real-world absence or
+      completeness. Cross-dimension counts can exceed the distinct game population.
+      Only rating/rating_count are summarized, never total_rating/total_rating_count.
+      Ratings are unweighted, without thresholds, rounding, defaults, or range
+      filters. NULL and supplied zero remain distinct. Rebuild after ingestion;
+      all columns reconcile to current source models at the same snapshot.
+    columns:
+      - name: genre_id
+        description: "Required unique BIGINT observed genre reference; grouping key, including valid zero/negative IDs."
+        data_tests:
+          - unique
+          - not_null
+      - name: name
+        description: "Nullable TEXT staged label; unmatched/unnamed references yield NULL; empty strings and duplicate labels are preserved."
+      - name: game_count
+        description: "Required positive BIGINT count of distinct associated staged games, including games without ratings/counts."
+      - name: rated_game_count
+        description: "Required BIGINT count of associated games with non-NULL rating; avg_rating denominator, zero if none."
+      - name: avg_rating
+        description: "Nullable NUMERIC unweighted mean of non-NULL staged rating, once per game regardless of rating_count; NULL if none, supplied zero included."
+      - name: rating_count_game_count
+        description: "Required BIGINT count of associated games with non-NULL rating_count, independently of rating; zero if none, supplied zero included."
+      - name: rating_count_sum
+        description: "Nullable NUMERIC sum of supplied BIGINT rating_count, independently of rating; NULL if none. Rating-volume context, not unique raters, weights, or an average denominator."
+  - name: mart_platform_performance
+    description: >-
+      Table snapshot with one row per observed platform_id associated with staged games.
+      Distinct game/ID pairs contribute once per dimension; independent aggregation
+      prevents genre/platform/company fanout. Group by IDs, never labels. Unmatched
+      references and unnamed dimensions survive a left label join; dimensions with
+      no observed games are omitted. Missing/null/empty associations create no
+      unknown bucket. Bounded observations do not establish real-world absence or
+      completeness. Cross-dimension counts can exceed the distinct game population.
+      Only rating/rating_count are summarized, never total_rating/total_rating_count.
+      Ratings are unweighted, without thresholds, rounding, defaults, or range
+      filters. NULL and supplied zero remain distinct. Rebuild after ingestion;
+      all columns reconcile to current source models at the same snapshot.
+    columns:
+      - name: platform_id
+        description: "Required unique BIGINT observed platform reference; grouping key, including valid zero/negative IDs."
+        data_tests:
+          - unique
+          - not_null
+      - name: name
+        description: "Nullable TEXT staged label; unmatched/unnamed references yield NULL; empty strings and duplicate labels are preserved."
+      - name: game_count
+        description: "Required positive BIGINT count of distinct associated staged games, including games without ratings/counts."
+      - name: rated_game_count
+        description: "Required BIGINT count of associated games with non-NULL rating; avg_rating denominator, zero if none."
+      - name: avg_rating
+        description: "Nullable NUMERIC unweighted mean of non-NULL staged rating, once per game regardless of rating_count; NULL if none, supplied zero included."
+      - name: rating_count_game_count
+        description: "Required BIGINT count of associated games with non-NULL rating_count, independently of rating; zero if none, supplied zero included."
+      - name: rating_count_sum
+        description: "Nullable NUMERIC sum of supplied BIGINT rating_count, independently of rating; NULL if none. Rating-volume context, not unique raters, weights, or an average denominator."
+
+  - name: mart_company_output
+    description: >-
+      Table snapshot at one row per observed non-NULL company ID from
+      int_game_companies, never games' involved_company_ids arrays. Bounded
+      observed game-reference output, not complete company catalogs or verified
+      absence. Loaded unobserved companies are omitted; NULL-company records stay
+      upstream and reconcile separately. Group by IDs, never names. Aggregate
+      before label lookup; game existence checks prevent join fanout. Distinct
+      record IDs sharing a pair count separately as records, while each non-NULL
+      game counts once per company/role scope, including unloaded references.
+      Raw repeated IDs use last-upsert replacement; invalid duplicate bridge IDs
+      remain visible to upstream tests and record counts, never inflate distinct
+      games. Explicit true on any record qualifies that role; false and NULL
+      supply no true evidence, but NULL remains unknown. Both-true and conflicting
+      records can put a game in both role counts: never sum these as distinct
+      output. Both-false/unknown games still count in game_count. NULL games count
+      only as records. Zero counts and omitted rows establish no real-world absence.
+      Rebuild after ingestion; every column must reconcile to current sources.
+    columns:
+      - name: company_id
+        description: "Required unique BIGINT observed non-NULL company reference; ID grouping key, including valid zero/negative/large IDs."
+        data_tests:
+          - unique
+          - not_null
+      - name: name
+        description: "Nullable TEXT staged label; unloaded/unnamed yields NULL, empty strings and duplicate labels on distinct IDs are preserved."
+      - name: company_loaded
+        description: "Required BOOLEAN presence of company_id in stg_companies, independent of name availability."
+      - name: relationship_record_count
+        description: "Required positive BIGINT number of observed relationship records for this company, including repeated pairs and NULL games."
+      - name: null_game_relationship_count
+        description: "Required BIGINT count of records with NULL game references, not unloaded games; zero if none."
+      - name: game_count
+        description: "Required BIGINT distinct non-NULL game references across all roles, including unloaded games; zero if all references are NULL."
+      - name: loaded_game_count
+        description: "Required BIGINT distinct referenced games present in stg_games; subtraction from game_count gives unloaded references."
+      - name: developer_game_count
+        description: "Required BIGINT distinct non-NULL game references with any explicitly true developer record, loaded or not; zero means no observed true evidence."
+      - name: publisher_game_count
+        description: "Required BIGINT distinct non-NULL game references with any explicitly true publisher record, loaded or not; may overlap developer_game_count."

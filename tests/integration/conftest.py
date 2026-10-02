@@ -10,6 +10,14 @@ import requests
 from src.storage.raw_games import create_connection
 
 
+def pytest_configure(config):
+    """Declare the dbt behavior-test dependency marker for strict marker checking."""
+
+    config.addinivalue_line(
+        "markers", "dbt_models(*selectors): additional dbt models/ancestors needed by an isolated behavior test",
+    )
+
+
 @pytest.fixture(autouse=True)
 def require_postgres_opt_in(monkeypatch):
     """Keep default tests offline and prohibit accidental live source requests."""

@@ -149,28 +149,112 @@ Task 5.9 verified September 30, 2026: documented all five staging models and 35 
 
 Goal: create a small analytics model with obvious business value.
 
-- [ ] **6.1 Build game ↔ genre relationship model.**
-- [ ] **6.2 Build game ↔ platform relationship model.**
-- [ ] **6.3 Build game ↔ company relationship model with developer/publisher roles.**
-- [ ] **6.4 Build `mart_game_catalog`.** One stable game-centric surface for exploration.
-- [ ] **6.5 Build release-trend mart.**
-- [ ] **6.6 Build genre/platform performance mart(s).** Combine only if the resulting grain remains clear.
-- [ ] **6.7 Build company-output mart if source coverage supports it cleanly.**
-- [ ] **6.8 Add mart grain/metric documentation and dbt tests.**
+- [x] **6.1 Build game ↔ genre relationship model.**
+- [x] **6.2 Build game ↔ platform relationship model.**
+- [x] **6.3 Build game ↔ company relationship model with developer/publisher roles.**
+- [x] **6.4 Build `mart_game_catalog`.** One stable game-centric surface for exploration.
+- [x] **6.5 Build release-trend mart.**
+- [x] **6.6 Build genre/platform performance mart(s).** Combine only if the resulting grain remains clear.
+- [x] **6.7 Build company-output mart if source coverage supports it cleanly.**
+- [x] **6.8 Add mart grain/metric documentation and dbt tests.**
 
 **Exit criterion:** marts answer the project's documented use cases without Streamlit performing business transformations.
+
+Task 6.1 verified September 30, 2026: added documented `int_game_genres` at distinct game/genre-pair grain, with absent/null/empty arrays producing no rows and unmatched genre IDs retained. Two required-key tests and a composite-uniqueness test protect the bridge. Narrow offline/new database/staging regression checks passed 15/15/6; the default suite passed 431 with 66 skipped and the enabled suite passed 497. The existing-data build created six views, passed 23 dbt tests, and matched all 11 source-array pairs, including eight unmatched references. No ingestion was needed; raw/history hashes and unrelated files were preserved, disposable schemas were removed, and PostgreSQL was stopped/unregistered. **At that point only 6.1 was newly complete; 6.2 verification follows below.** See [verification](engineering/TESTING.md#task-61-game-genre-relationship-verification).
+
+Task 6.2 verified September 30, 2026: added documented `int_game_platforms` at distinct game/platform-pair grain, following the genre bridge's expansion, duplicate, null, and malformed-input policy. Unmatched IDs are retained without reference-existence tests. Narrow offline/new PostgreSQL checks passed 17/15; the default suite passed 433 with 81 skipped and the full enabled suite passed 514. The existing-data build created seven views, passed 26 dbt tests, and matched all 14 platform pairs, including eight unmatched references. Existing genre/staging coverage, schema precedence, and independent output schemas are preserved. No ingestion was needed; raw/history hashes matched, disposable schemas were removed, and PostgreSQL was stopped/unregistered. **At that point only 6.2 was newly complete; 6.3 verification follows below.** See [verification](engineering/TESTING.md#task-62-game-platform-relationship-verification).
+
+Task 6.3 verified September 30, 2026: added documented `int_game_companies` at involved-company record grain, preserving repeated game/company pairs, nullable/unmatched references, and independent nullable developer/publisher flags. Only the record ID is required and unique. Narrow offline/new PostgreSQL checks passed 18/12; the default suite passed 435 with 93 skipped, and the enabled suite passed 528. The existing-data build created eight views and passed 28 tests; all five company relationships matched raw and staged records, including three with unmatched references. All eight models and 44 columns are documented. No ingestion was needed; raw/history hashes matched, disposable schemas were removed, and PostgreSQL was stopped/unregistered. **At that point only 6.3 was newly complete; 6.4 verification follows below.** See [verification](engineering/TESTING.md#task-63-game-company-relationship-verification).
+
+Task 6.4 verified September 30, 2026: added the eleven-column `mart_game_catalog` table at exactly one row per staged game, with nullable scalar pass-through and independently aggregated, ordered observed relationship objects. Missing references and company record/role semantics are preserved. Narrow offline/database checks passed 22/33; the default suite passed 438 with 120 skipped, and the enabled suite passed 558. The existing-data build created eight views plus the catalog table and passed 31 dbt tests; all five catalog games and every projected value matched source models. Nine models and 55 columns are documented. No ingestion was needed; raw/history hashes and earlier work were preserved, disposable schemas were removed, and PostgreSQL was stopped/unregistered. **At that point only 6.4 was newly complete; task 6.5 verification follows below.** See [verification](engineering/TESTING.md#task-64-game-catalog-verification).
+
+Task 6.5 verified September 30, 2026: added the two-column `mart_release_trends`
+table at observed UTC release-year grain directly over staged games. Counts
+exclude NULL dates, omit unobserved years, preserve zero/negative epochs, and
+reconcile to all staged games after adding undated games. No relationship fanout,
+date cutoff, or later-mart metric was introduced. Narrow offline/database checks
+passed 19/45; the default suite passed 441 with 159 skipped, and the full enabled
+suite passed 600. Existing-data build: eight views, two tables, 36 dbt tests,
+ten models/57 documented columns. Annual counts match staging/catalog exactly:
+1998: 2; 2000/2004/2014: 1 each; five dated plus zero undated equals five games.
+No ingestion was needed; raw/history hashes and prior work were preserved,
+disposable schemas removed, and PostgreSQL stopped/unregistered. **At that point only 6.5 was
+newly complete; task 6.6 verification follows below.** See [verification](engineering/TESTING.md#task-65-annual-release-trends-verification).
+
+Task 6.6 verified October 1, 2026: two seven-column performance tables group by
+observed genre/platform ID, independently deduplicate pairs, retain unmatched labels,
+and report five descriptive metrics with explicit non-NULL contributor counts.
+No thresholds, weighting, ranking, forecasting, or company work was added. Narrow
+offline/database checks passed 16/27; default suite: 447 passed, 180 skipped;
+full enabled: 627 passed. Existing-data build: eight views, four tables, 42 dbt
+tests, twelve models/71 documented columns. All four genre/nine platform rows and
+every metric match independently derived sources. Deliberate invariant failures,
+bridge multiplicities, malformed input and recovery are tested. No ingestion was
+needed; earlier work/raw/history were preserved, disposable schemas removed,
+and PostgreSQL stopped/unregistered. **At that point only 6.6 was newly complete; task 6.7 verification follows.** See [verification](engineering/TESTING.md#task-66-genreplatform-performance-verification).
+
+Task 6.7 verified October 1, 2026: source contracts and five stored relationships
+support a nine-column observed company-output table without ingestion. One row
+per observed non-NULL company ID retains unloaded references, nullable labels,
+record/game count distinctions, and independent explicit role evidence. Role
+counts may overlap; unknown is not false. Narrow offline/PostgreSQL: 14/45 passed;
+full default: 450 passed, 207 skipped; full enabled: 657 passed. Existing-data
+build: eight views, five tables, 45 dbt tests, thirteen models/80 columns. All five
+company rows and every metric match independent sources. Deliberate invariant
+failures and recovery, repeated records/lookups, nullable roles and missing
+references are covered. Earlier work and raw/history are preserved; disposable
+schemas are removed and PostgreSQL is stopped/unregistered. **Only 6.7 is newly
+complete; 6.8 and later remain unchecked.** See [verification](engineering/TESTING.md#task-67-company-output-verification).
+
+Task 6.8 verified October 2, 2026: audited all five mart contracts, documented
+shared refresh/denominator semantics and a concise documentation-to-test matrix.
+Existing release/performance/company reconciliations and catalog value coverage
+were sufficient; one catalog array-container invariant closes the remaining dbt
+guard gap, with exact deliberate failures and rebuild recovery. No model SQL or
+architecture change. Narrow offline/PostgreSQL: 15/15 passed; full default:
+450 passed, 83 skipped; full enabled: 533 passed in 373.86s. Existing-data build:
+eight views, five tables, 46 dbt tests; all mart values independently reconciled.
+The optimized harness, earlier work, raw/history and private files are preserved;
+no ingestion, disposable schemas cleaned, PostgreSQL stopped/unregistered.
+**Only 6.8 is newly complete; Phase 6 is complete. Phase 7 and later remain unchecked.**
+See [audit and verification](engineering/TESTING.md#task-68-mart-contract-audit-verification).
 
 ## Phase 7 — Docker Compose
 
 Goal: make the platform reproducible on a new machine.
 
-- [ ] **7.1 Add PostgreSQL service with health check and persistent volume.**
-- [ ] **7.2 Containerize the Python/dbt runtime or create a shared project image.**
+- [x] **7.1 Add PostgreSQL service with health check and persistent volume.**
+- [x] **7.2 Containerize the Python/dbt runtime or create a shared project image.**
 - [ ] **7.3 Add Compose configuration and environment wiring without baking secrets into images.**
 - [ ] **7.4 Add initialization/startup documentation.**
 - [ ] **7.5 Verify a clean-volume setup can ingest data and run `dbt build`.**
 
 **Exit criterion:** the documented Docker workflow can create the database and run the core pipeline from a clean environment.
+
+Task 7.1 verified October 2, 2026: `compose.yaml` defines only
+PostgreSQL 17.11 Bookworm with an external password, TCP health check, loopback
+port, and project-scoped named volume. Colima resolved the initial missing-engine
+blocker. Health, authenticated SQL, incorrect-password rejection, marker persistence
+across container removal/recreation, and stop/start passed. A test-only correction
+supplies the password omitted from Psycopg's reconnect DSN. Narrow/default/enabled
+results: 1 passed; 450 passed with 83 skipped; 533 passed in 374.61s. All 46 dbt
+tests pass under each of the three full-project schema modes. Disposable resources
+were removed; native PostgreSQL and Colima are stopped, with prior work/data preserved.
+**Only 7.1 is newly complete; 7.2 and later remain unchecked.** See [validation
+and procedure](engineering/TESTING.md#task-71-docker-postgresql-validation).
+
+Task 7.2 verified October 2, 2026: `docker/Dockerfile` builds a shared non-root
+Python 3.11.16/dbt image from unchanged requirements, with direct command overrides
+and external credentials/artifacts. `.dockerignore` and three executable image
+checks protect the build context; all eleven layers pass the privacy audit.
+Python/dbt versions, CLI help, parsing and `pip check` pass. Container suites:
+450 passed / 83 skipped by default; one targeted PostgreSQL case; all 533 enabled
+tests in 275.40s, retaining all scenarios and three complete schema modes.
+Disposable internal-network PostgreSQL used synthetic fixtures and tmpfs storage;
+no IGDB access or real-data pipeline run occurred. Resources were cleaned and
+Colima/native PostgreSQL are stopped/unregistered; existing work/data are preserved.
+**Only 7.2 is newly complete; 7.3–7.5 and later remain unchecked.** See
+[image validation](engineering/TESTING.md#task-72-shared-image-validation).
 
 ## Phase 8 — Airflow orchestration
 
