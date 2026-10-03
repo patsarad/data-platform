@@ -231,6 +231,25 @@ Rebuild after ingestion; NULL-company records remain upstream for reconciliation
 
 Airflow should coordinate, not contain business logic. DAG tasks should call reusable Python/dbt commands rather than duplicate their internals.
 
+Task 8.1 supplies an opt-in local Airflow 3.3.2/Python 3.11 image and Compose
+API/UI, scheduler/LocalExecutor, DAG processor and separate PostgreSQL metadata
+service. LocalExecutor parallelism is one; no broker, distributed worker or
+triggerer is needed. Initialization/migration is an explicit separate profile.
+Airflow metadata, private authentication/configuration and logs have independent
+named volumes. Task 8.2 gives only the scheduler warehouse/source settings and a
+separate `airflow_raw_archives` volume. Task 8.3 extends its manual `igdb_ingestion`
+DAG to `ingest_all` → `dbt_build`, invoking the existing CLI and dbt project with
+absolute executables from an isolated application virtual environment. Task 8.4 makes
+the `all_success` dependency explicit and gives both tasks one whole-command retry
+after a fixed one-minute delay. Exhausted ingestion prevents dbt execution;
+exhausted dbt fails the DAG. Earlier per-entity commits/checkpoints and completed
+dbt relations survive failures; no cross-command rollback is added. All Airflow
+components share the same baked DAG/source/dbt image. Only the scheduler receives
+dbt settings and a separate UID-50000 `airflow_dbt_artifacts` volume; Airflow
+dependencies and UID-10001 tools storage stay separate.
+Ordinary startup and the `tools` runtime retain their Phase 7 behavior. See
+[topology, supported versions, resource requirements and command packaging](pipeline/ORCHESTRATION.md#local-infrastructure-task-81).
+
 Target dependency graph:
 
 ```text

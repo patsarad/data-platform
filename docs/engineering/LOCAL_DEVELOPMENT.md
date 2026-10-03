@@ -96,8 +96,9 @@ Initialization has three separate owners:
 | Python ingestion | Against an existing database, creates the selected raw schema, `ingestion_runs` and each selected entity's `raw_<entity>` table, archives payloads and upserts rows. It does not create the database/login. |
 | dbt | Reads the five existing raw tables, creates its output schema/models and runs tests. Source declarations and `dbt parse` create no raw tables. |
 
-There are no custom initialization scripts, migrations or automatic raw/dbt
-bootstrap steps in Compose.
+The warehouse has no custom initialization scripts, migrations or automatic
+raw/dbt bootstrap steps. Optional Airflow has a separate explicit metadata
+initialization command, described [below](#local-airflow-task-81).
 
 ### Run commands on demand
 
@@ -285,7 +286,7 @@ Confirm `python --version` reports 3.11 before installing. A system `python3` or
 
 On Windows PowerShell, create the environment with `py -3.11 -m venv .venv` and activate it with `.venv\Scripts\Activate.ps1`, then use the same `python -m ...` commands. The verified platform is macOS with Python 3.11.0; Windows has not been exercised.
 
-`requirements.txt` contains the current runtime and test dependencies: requests, python-dotenv, psycopg (binary), dbt-postgres, and pytest. Airflow and Streamlit remain future milestones. Dependency ranges are bounded but not locked; installation does not guarantee identical transitive versions on every date. No dependency changes were needed for the Phase 1 validation.
+`requirements.txt` contains the current runtime and test dependencies: requests, python-dotenv, psycopg (binary), dbt-postgres, and pytest. Airflow uses its own optional container image; Streamlit remains future work. Dependency ranges are bounded but not locked; installation does not guarantee identical transitive versions on every date. No dependency changes were needed for the Phase 1 validation.
 
 ## Tests
 
@@ -671,3 +672,206 @@ verified real bounded archives, raw/history/model persistence and artifact expor
 from new volumes. Disposable validation cleanup enabled `--profile tools` before
 `down --volumes` to include the runtime volumes; this is destructive and is not
 the normal session shutdown command.
+
+## Local Airflow (task 8.1)
+
+Airflow is optional. Plain `dc up` remains PostgreSQL-only; `tools` commands need
+no Airflow credentials. The `airflow` profile selects the API/UI server, scheduler,
+DAG processor and a separate metadata PostgreSQL service. `airflow-init` is a
+separate one-off profile so ordinary Airflow startup does not migrate a database.
+The manual ingestion → dbt DAG is described below. See [topology and command execution](../pipeline/ORCHESTRATION.md#local-infrastructure-task-81).
+
+Airflow recommends **at least 4 GB memory** (the Docker guide prefers 8 GB).
+Use that as the baseline for future ingestion/dbt workloads, with at least two
+CPUs for this local configuration. The existing 2 CPU/2 GiB Colima profile passed
+idle infrastructure checks with one API worker, one parsing process and
+LocalExecutor parallelism 1; this is not a pipeline capacity test. Do not resize
+or recreate that profile implicitly. If it exhausts memory, stop the task services,
+inspect `docker stats` and container OOM state, and obtain approval for a resource
+change. No broker, distributed worker or triggerer is needed for ordinary command
+tasks. Deferrable operators would require revisiting the triggerer decision.
+
+### First use
+
+Prepare the existing [Docker shell](#colima-on-this-mac) and
+[project/database environment](#select-the-environment), including the `dc`
+function that always supplies `--env-file /dev/null`. Do not source `.env` or load
+IGDB credentials for infrastructure setup. Choose a new project for validation;
+reuse the same project and credentials for later sessions. In that shell:
+
+```bash
+unset igdb_client_id igdb_client_secret COMPOSE_PROFILES
+export AIRFLOW_PORT=8080  # Choose an unused loopback port.
+read -r -s -p 'Separate Airflow metadata DB password: ' AIRFLOW_DB_PASSWORD
+echo
+read -r -s -p 'Airflow admin password: ' AIRFLOW_ADMIN_PASSWORD
+echo
+export AIRFLOW_DB_PASSWORD AIRFLOW_ADMIN_PASSWORD
+dc --profile airflow config --quiet
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc build airflow-init
+# Explicit first-use operation; starts only its metadata DB dependency.
+dc run --rm -T airflow-init
+unset AIRFLOW_ADMIN_PASSWORD
+# Also selects the ordinary warehouse PostgreSQL service.
+dc --profile airflow up -d --wait --wait-timeout 240
+dc --profile airflow ps
+```
+
+Retain both passwords privately. The image pins `apache/airflow:3.3.2-python3.11`
+and packages the initialization helper, ingestion source, existing dbt project/profile,
+one DAG and an isolated ingestion/dbt virtual environment. No host Airflow
+installation is needed. The root allowlisted build context excludes repository data/credentials; the image copies
+only the files needed for ingestion, dbt and Airflow initialization. Airflow runs as
+UID 50000/GID 0, following the official image's non-root permission model. GID 0
+does not make the process root. Named volumes inherit writable image directories;
+there are no host mounts, privileged containers or Docker socket mounts.
+
+The dedicated `airflow-postgres:5432/airflow` database uses its own password and
+`airflow_postgres_data` volume, with no host port. Its image-created `airflow` role
+is a local-development superuser **only in that separate metadata cluster**;
+it has no account in the warehouse. Only the scheduler receives `POSTGRES_*`
+and source/dbt settings for command execution; API, processor and init do not. The warehouse remains `postgres:5432` with
+its unchanged raw/output schema behavior. Empty Airflow passwords fail on Airflow
+startup; they do not prevent PostgreSQL/tools configuration or use.
+
+First initialization privately writes the `admin` password, a random Fernet key
+and a shared JWT signing secret into `airflow_config`, then runs `airflow db migrate`
+against the fixed metadata target. Password URI characters are encoded. File mode
+is 0600; nothing prints the passwords or keys. Do not run initialization concurrently.
+With services stopped, repeating it preserves all files and safely reruns the
+migration; the admin password can be omitted afterward. A supplied different
+admin password or missing retained keys fails instead of rotating state. On a
+migration error, preserve volumes, inspect logs, correct the cause and rerun.
+Never use this procedure to migrate an existing unrelated database.
+
+### Authentication, health and logs
+
+Open `http://127.0.0.1:8080` (or the selected `AIRFLOW_PORT`) and log in as `admin`
+with the password supplied at initialization. SimpleAuthManager is explicitly
+enabled, with anonymous-admin mode disabled. It is Airflow's development/testing
+auth manager, appropriate only for this loopback local deployment. The password
+file is private plaintext; protect exported backups and Docker access.
+
+The API uses a JWT from `POST /auth/token`, not HTTP Basic authentication.
+This optional probe prompts privately and prints only statuses/counts:
+
+```bash
+python - <<'PY'
+import getpass, json, os, urllib.request
+base = 'http://127.0.0.1:' + os.environ.get('AIRFLOW_PORT', '8080')
+body = json.dumps({'username': 'admin', 'password': getpass.getpass('Airflow password: ')}).encode()
+request = urllib.request.Request(base + '/auth/token', data=body, headers={'Content-Type': 'application/json'})
+with urllib.request.urlopen(request) as response:
+    token = json.load(response)['access_token']
+request = urllib.request.Request(base + '/api/v2/dags', headers={'Authorization': 'Bearer ' + token})
+with urllib.request.urlopen(request) as response:
+    print('Authenticated; DAG count:', json.load(response)['total_entries'])
+PY
+```
+
+Expect exactly `igdb_ingestion` after task 8.2, initially paused. The API container health check calls `/api/v2/version`;
+the scheduler has its own `/health` server on internal port 8974; the DAG processor
+uses `airflow jobs check --job-type DagProcessorJob --local`. PostgreSQL readiness
+uses TCP. Verify authenticated metadata access and inspect aggregate health:
+
+```bash
+dc exec -T airflow-scheduler airflow db check
+curl --fail --silent "http://127.0.0.1:${AIRFLOW_PORT:-8080}/api/v2/monitor/health"
+dc --profile airflow logs --tail 100 airflow-api-server airflow-scheduler airflow-dag-processor airflow-postgres
+```
+
+Read the health JSON: `metadatabase`, `scheduler`, and `dag_processor` must each
+be `healthy`; an HTTP 200 alone does not prove that. `triggerer` is null by design.
+Only API/UI port 8080 is published, bound to loopback. Scheduler log/health ports
+remain internal. Service logs go to Docker stdout; task/processor file logs persist
+in `airflow_logs`, including both `ingest_all` and `dbt_build` command output and failures.
+Do not print resolved Compose configuration, unfiltered environments, keys or tokens.
+
+### Manual ingestion and dbt DAG (tasks 8.2–8.3)
+
+Rebuild after DAG/source/dbt/dependency changes and recreate all Airflow components:
+
+```bash
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc build airflow-init
+dc --profile airflow up -d --force-recreate --wait --wait-timeout 240
+dc exec -T airflow-scheduler airflow dags list-import-errors -o json
+dc exec -T airflow-scheduler airflow dags list -o json
+```
+
+Expect no import errors and only `igdb_ingestion`. Startup/discovery never ingests.
+The DAG has exactly `ingest_all` → `dbt_build` and `schedule=None`, initially paused.
+A manual trigger uses the existing **uncapped** normal `--entity all` command; it may bootstrap
+whole endpoints. Select the intended warehouse/source schema and supply source
+credentials only when deliberately ready for live ingestion, then recreate the
+scheduler to receive them. Unpause and trigger `igdb_ingestion` in the UI to run it;
+inspect both task statuses and logs. Successful ingestion now runs the existing
+full dbt build (13 models/46 tests) against the selected warehouse. An ingestion
+failure prevents dbt execution until ingestion succeeds. Each task has one
+automatic retry after a fixed one-minute delay (two total attempts). Exhausted
+ingestion leaves dbt unstarted; exhausted dbt fails the DAG and can leave some
+relations updated. Inspect `up_for_retry` and both attempt logs before diagnosing
+a final failure. A retry repeats the entire all-entity CLI or dbt build; earlier
+commits remain. See [retry and failure policy](../pipeline/ORCHESTRATION.md#dependencies-retries-and-failure-behavior-task-84).
+There are no runtime command parameters or recurring schedule. Validation uses
+synthetic HTTP responses; live-source Airflow execution and real workload capacity
+remain unverified.
+
+Archives live in the separate persistent `airflow_raw_archives` volume at
+`/opt/airflow/app/data/raw`, writable by scheduler UID 50000. Tools archives remain
+in `raw_archives` under UID 10001; neither store is automatically copied to the other.
+Both commands use the same warehouse/schema selections and existing ingestion
+history. Avoid concurrent manual/tools ingestions against these schemas; task retries
+do not provide a lock across runs or standalone commands. `DBT_SCHEMA` independently
+selects outputs for both the tools runtime
+and the Airflow scheduler; export it before creating the scheduler. The existing
+explicit → legacy → `raw` source-schema precedence applies to both commands.
+
+`dbt_build` executes `/opt/airflow/app-venv/bin/dbt build` with explicit
+`--project-dir /opt/airflow/app/dbt --profiles-dir /opt/airflow/app/dbt`. Scheduler-only
+settings disable dbt telemetry and write targets/logs under `/opt/airflow/dbt-artifacts`
+in the dedicated `airflow_dbt_artifacts` volume, writable as UID 50000. The tools'
+UID-10001 `dbt_artifacts` volume remains independent. Normal shutdown retains both.
+Sequential dbt runs overwrite target filenames and append logs; export before the
+next build or automatic retry when retaining invocation evidence. The retry wait
+is at least 60 seconds; no automatic per-run artifact retention is added.
+
+Export Airflow archives and dbt artifacts before deleting disposable validation volumes:
+
+```bash
+airflow_container=$(dc ps -q airflow-scheduler)
+export_dir=$(mktemp -d /private/tmp/data-platform-airflow-archives.XXXXXX)
+chmod 700 "$export_dir"
+docker cp "$airflow_container:/opt/airflow/app/data/raw/." "$export_dir/raw"
+docker cp "$airflow_container:/opt/airflow/dbt-artifacts/." "$export_dir/dbt"
+```
+
+### Preserve, shut down and resume
+
+For a private export outside the repository, use `docker cp` from the running
+scheduler plus a metadata dump (the latter does not contain login-role passwords):
+
+```bash
+export_dir=$(mktemp -d /private/tmp/data-platform-airflow-export.XXXXXX)
+chmod 700 "$export_dir"
+airflow_container=$(dc ps -q airflow-scheduler)
+docker cp "$airflow_container:/opt/airflow/config/." "$export_dir/config"
+docker cp "$airflow_container:/opt/airflow/logs/." "$export_dir/logs"
+dc exec -T airflow-postgres pg_dump -U airflow -d airflow --no-owner --no-privileges > "$export_dir/metadata.sql"
+# Stop/remove this project's containers; keep ALL named volumes.
+dc --profile airflow --profile airflow-init --profile tools down
+unset AIRFLOW_DB_PASSWORD AIRFLOW_ADMIN_PASSWORD POSTGRES_PASSWORD
+colima stop data-platform  # This Mac; only after intended containers are stopped.
+```
+
+Keep metadata, configuration/keys and logs together. Exports above are not a tested
+restore procedure. Routine shutdown must not use `--volumes`. On a subsequent
+session, start the existing engine, select the same project, re-export warehouse
+settings and the original `AIRFLOW_DB_PASSWORD`, then run
+`dc --profile airflow up -d --wait --wait-timeout 240`. No admin password input or
+migration is required merely to resume. Rebuild after image/helper changes; review
+release migration guidance before changing the Airflow pin. Changing environment
+passwords does not rotate PostgreSQL credentials in existing volumes.
+
+Only for a verified disposable project, after exporting evidence, cleanup includes
+all profiles: `dc --profile airflow --profile airflow-init --profile tools down --volumes`.
+Never prune other projects or delete retained volumes to fix authentication errors.

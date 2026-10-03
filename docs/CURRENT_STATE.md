@@ -1,6 +1,6 @@
 # Current State
 
-Last verified against the working repository on October 2, 2026 (Phases 6 and 7 complete; task 7.5 clean-volume bounded live workflow and all 533 enabled tests pass).
+Last verified against the working repository on October 3, 2026 (Phases 6 and 7 complete; task 8.4 explicit dependencies and automatic retries verified with synthetic inputs).
 
 This document describes what exists in code today. Planned components belong in `ARCHITECTURE.md` and `ROADMAP.md`.
 
@@ -25,7 +25,7 @@ This document describes what exists in code today. Planned components belong in 
 | dbt project | Five staging views, three relationship views, and five mart tables built and queried | `analytics.stg_games`, `analytics.stg_genres`, `analytics.stg_platforms`, `analytics.stg_companies`, and `analytics.stg_involved_companies` exist locally; five existing rows per staging model matched raw records; `analytics.int_game_genres` matched all 11 source-array pairs, including eight unmatched genre references; `analytics.int_game_platforms` matched all 14 platform pairs, including eight unmatched references; `analytics.int_game_companies` matched all five source records, including three with unmatched game/company references; `analytics.mart_game_catalog` matched all five staged games and every scalar/relationship value; `analytics.mart_release_trends` matched UTC yearly counts (1998: 2; 2000/2004/2014: 1 each), totaling five dated games plus zero undated; genre/platform performance marts match every source-derived value for four genre and nine platform rows, with summed game counts 11/14 across five games; company output matches all nine values for five observed company IDs, retaining two unloaded companies and two unloaded game references |
 | dbt sources/tests/docs | Thirteen models and 80 columns documented; ten source, ten staging, eight relationship, four catalog, five release-trend, six performance, and three company-output tests pass against PostgreSQL | Python/dbt share `POSTGRES_RAW_SCHEMA` → legacy `POSTGRES_SCHEMA` → `raw` precedence. Opt-in tests build/query all thirteen models with explicit, legacy, and conflicting schema settings |
 | Docker | Phase 7 complete; bounded clean-volume live workflow verified (7.5) | Profiled `runtime` supports direct Python/dbt commands, explicit `postgres:5432` connectivity, external allowlisted settings and non-root named archive/artifact volumes; ordinary startup runs only PostgreSQL; two bounded all-entity live runs, 13 models/46 dbt tests, container-replacement persistence and all 533 enabled tests pass through isolated Compose |
-| Airflow | Not implemented | `dags/` is a placeholder |
+| Airflow | Explicit dependencies and bounded retries implemented (8.4) | Airflow 3.3.2/Python 3.11; exactly `ingest_all` → `dbt_build`, explicit `all_success`, one whole-command retry after one minute for both tasks; LocalExecutor automatic recovery/exhaustion, retained commits/history and visible attempt logs verified with synthetic inputs; no recurring schedule |
 | Streamlit | Not implemented | `app/` is a placeholder |
 | AI layer | Not implemented / deferred | `src/ai/` is a placeholder |
 | CI | Not implemented | No automated repository checks observed |
@@ -767,6 +767,135 @@ clean-environment core-pipeline exit criterion is satisfied. Phase 8 and later
 remain unchecked. This is bounded startup validation, not full source coverage,
 a clean-clone/new-machine test, or an uncapped incremental bootstrap. See
 [exact commands, evidence and limits](engineering/TESTING.md#task-75-clean-volume-live-workflow-verification).
+
+## Task 8.1 local Airflow infrastructure verification
+
+On October 3, 2026, the new `airflow` profile passed initialization, authenticated
+UI/API and metadata connectivity, scheduler/processor health and container-replacement
+persistence on fresh task-owned volumes. Airflow 3.3.2/Python 3.11.16 runs as UID
+50000 with LocalExecutor parallelism one, one API worker and one parser. Separate
+PostgreSQL metadata, private password/keys and logs persist in three named volumes.
+Repeated explicit initialization preserves credentials/keys and metadata. Only the
+UI/API publishes a loopback port; no broker, worker, host mount or Docker socket
+is added. Ordinary PostgreSQL-only startup and tools use without Airflow credentials
+are verified. Application dependencies remain unchanged.
+
+New evidence: nine initialization tests, eight Compose checks, three current-image
+checks, **459 host tests / 83 skipped**, **15 synthetic ingestion integration tests**,
+and **533 enabled application tests** pass. CLI help, dbt parsing and
+`dbt debug --connection` pass. Both anonymous and wrong-password API access are
+rejected; authenticated UI configuration and API access succeed. Examples are off,
+with zero DAGs, DAG runs and task instances. No Twitch/IGDB access or source loads
+occurred. These results are separate from task 7.5's historical live evidence.
+
+The existing 2 CPU/2 GiB Colima profile passed the idle infrastructure check
+(about 641–659 MiB across five services), without resize, restarts or OOM kills.
+Airflow still recommends at least 4 GB RAM; this does not establish future pipeline
+capacity. Evidence was exported before task-only cleanup. Colima and native
+PostgreSQL are stopped/unregistered; earlier work, private/native data, tracked
+artifacts, original Docker resources and Git index are preserved. Only **8.1** is
+newly complete. **8.2–8.6** and Phase 8's end-to-end exit criterion remain incomplete.
+See [exact commands, versions, results and limits](engineering/TESTING.md#task-81-local-airflow-infrastructure-verification)
+and [local operation](engineering/LOCAL_DEVELOPMENT.md#local-airflow-task-81).
+
+## Task 8.2 ingestion DAG verification
+
+On October 3, 2026, `igdb_ingestion` / `ingest_all` invoked the unchanged ingestion
+CLI (`--entity all`) through Airflow LocalExecutor. A synthetic success wrote one
+row and archive per entity and five successful history records; an injected source
+failure produced a failed task/DAG run and one failed games history record.
+Incremental checkpoint behavior and source-schema precedence remained unchanged.
+No Twitch/IGDB requests or real source credentials were used. These are new
+synthetic results, separate from Phase 7 live evidence and task 8.1 infrastructure checks.
+
+The same image supplies DAGs to all Airflow components. The application uses its
+own Python virtual environment with only ingestion dependencies, separate from
+Airflow. Only the scheduler receives warehouse/source settings and its own
+UID-50000 archive volume; existing UID-10001 tools archives remain independent.
+The DAG is manual-only and initially paused, with no dbt task or workflow policy.
+
+New checks passed: 11 narrow host tests, nine Compose checks, two Airflow image
+checks, three tools image checks, 461 default tests / 83 skipped, 15 narrow
+synthetic ingestion integration tests, and 533 enabled application tests.
+Initialization, authentication, health, container-replacement persistence and
+standalone CLI/dbt probes were rechecked. The 2 GiB VM was not resized; resource
+samples and tiny synthetic runs do not establish real ingestion capacity.
+Evidence was exported before task-only cleanup; existing work/data/resources and
+Git index were preserved, with Colima/native PostgreSQL stopped/unregistered.
+Only **8.2** is newly complete; **8.3–8.6** and Phase 8's exit criterion remain open.
+See [exact verification and caveats](engineering/TESTING.md#task-82-ingestion-dag-verification).
+
+## Task 8.3 dbt task verification
+
+On October 3, 2026, the manual DAG's new `dbt_build` task ran the existing project
+through `/opt/airflow/app-venv/bin/dbt`, with absolute project/profile paths.
+`ingest_all` must succeed first. Actual LocalExecutor scenarios verified success
+(13 models/46 tests), ingestion failure (dbt upstream_failed with zero attempts
+and unchanged artifacts), controlled dbt test failure (failed task/DAG), and recovery.
+No production source/SQL logic or broader scheduling/retry policy changed.
+
+The shared image now contains dbt-postgres and the existing dbt definitions in the
+isolated application environment; Airflow dependencies remain separate. Only the
+scheduler receives dbt settings and the UID-50000 `airflow_dbt_artifacts` volume.
+Standalone UID-10001 tools storage/workflow is unchanged. Actual app/dbt builds
+verify default, legacy and explicit-over-legacy sources with independent outputs.
+Container replacement preserves exact artifact/config/archive hashes, synthetic
+warehouse contents and all four DAG-run states; authentication/health pass again.
+
+New task-8.3 results: **11 narrow host tests**, **nine Compose checks**, **three
+Airflow image checks**, **three tools image checks**, **461 host tests / 83 skipped**,
+**15 ingestion integration tests**, and **533 enabled application tests in 272.97s**.
+All database fixtures are synthetic/disposable. These results are separate from
+Phase 7's live-source evidence and tasks 8.1–8.2; no Twitch/IGDB access occurred.
+The unchanged 2 CPU/2 GiB VM had no OOM kills/restarts; point samples do not
+establish live workload capacity. Artifacts represent the latest invocation;
+export before another build for retained evidence. dbt failure does not roll back
+already committed ingestion or dbt relations.
+
+Evidence was exported before task-only cleanup. Existing work/data/resources,
+tracked generated files and Git index are preserved; Colima/native PostgreSQL
+are stopped/unregistered. Only **8.3** is newly complete; **8.4–8.6** and Phase 8's
+exit criterion remain open. See [exact commands and limits](engineering/TESTING.md#task-83-dbt-task-verification).
+
+## Task 8.4 dependency, retry and failure verification
+
+Verified October 3, 2026. Both existing BashOperators inherit explicit
+`all_success`, `retries=1`, a one-minute `retry_delay` and disabled exponential
+backoff. Commands, absolute interpreters, cwd, nonzero-exit handling, disabled
+XCom, `schedule=None` and initial pausing are unchanged. No ingestion/storage/dbt
+logic, transaction boundary, HTTP retry behavior, dependency or service changed.
+A retry repeats the whole all-entity CLI or dbt build; earlier committed entities,
+history/checkpoints and completed models survive a later failure.
+
+Four real LocalExecutor synthetic runs verified automatic ingestion recovery,
+ingestion exhaustion blocking dbt, dbt recovery, and dbt exhaustion failing the
+DAG. Attempt counts were ingestion/dbt **2/1, 2/0, 1/2, 1/2**; first failures
+entered `up_for_retry`, with retry gaps **60.65, 60.06, 60.39 and 60.22 seconds**.
+All eleven executed attempt logs were visible through the authenticated API;
+XCom remained empty. Both successful builds produced 13 models/46 passing tests.
+Per-attempt dbt artifacts were exported before overwriting; 27 entity history
+records (24 successes/three failures), 24 archives, duplicate-safe raw rows,
+retained earlier commits and fresh per-entity overlap checkpoints were reconciled.
+Synthetic curated values matched expected results. No source credentials were
+loaded and no actual Twitch/IGDB requests occurred.
+
+New task-8.4 checks: **11 narrow host passes**, **461 host passes / 83 skipped**,
+**nine Compose checks**, **three Airflow image checks**, **three tools image
+checks**, **15 ingestion integration passes**, and **533 enabled application
+passes**. Current-source builds, discovery, environment/dependency isolation,
+UID-50000/UID-10001 storage, tools without Airflow credentials, slim-runtime
+`dbt debug --connection`, initialization/authentication/health and container
+replacement persistence passed. Temporary harness assertions were corrected
+without changing production behavior or clearing/retriggering task attempts.
+
+Evidence is exported privately under `/private/tmp/data-platform-task84/`;
+task-owned resources/images were removed. Docker inventories, prior work/data,
+protected files and Git index are preserved; Colima/native PostgreSQL are stopped
+and unregistered. Tiny synthetic runs on the unchanged 2 CPU/2 GiB VM do not
+establish live-source workload capacity. Only **8.4** is newly complete;
+**8.5–8.6** and Phase 8's exit criterion remain open. See
+[exact commands and results](engineering/TESTING.md#task-84-dependency-retry-and-failure-verification)
+and [whole-command policy](pipeline/ORCHESTRATION.md#dependencies-retries-and-failure-behavior-task-84).
 
 ## Known repository hygiene items
 

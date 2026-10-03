@@ -3979,3 +3979,725 @@ source/reference coverage, uncapped incremental bootstrap/checkpoint publication
 or source snapshot isolation. Dependency ranges/base tags remain mutable. No
 startup automation, migration, watermark reset, data deletion from existing
 installations, repository artifact removal or commit was introduced.
+
+## Task 8.1 local Airflow infrastructure verification
+
+Verified October 3, 2026. These are **new task-8.1 results**, separate from Phase 7's
+bounded live IGDB evidence. No Twitch/IGDB requests, source credentials, real source
+loads, DAG implementation or pipeline runs were used. Synthetic integration tests
+alone exercised ingestion/dbt behavior in disposable warehouse schemas.
+
+Private evidence, temporary helpers and the task-only review diff are under
+`/private/tmp/data-platform-task81/` (directory mode 0700). `baseline/`,
+`hashes.json`, `external-hashes.json`, `index.sha256` and `baseline.diff` capture
+the initial working tree and preservation fingerprints. `commands.jsonl` records
+exact Docker/Compose argument arrays; command output is saved separately with
+validation passwords redacted. `driver.py` supplies a minimal environment with
+generated private credentials, never sources `.env`, and always uses
+`--env-file /dev/null`. Do not publish this directory: exported configuration
+contains the local validation account password and encryption/signing keys.
+
+Isolation: project `data-platform-task81-20261003-b91e`, previously unused loopback
+ports `55481` (warehouse) and `58081` (Airflow), new project-owned volumes only.
+Engine: existing Colima 0.10.3, 2 CPUs, 2 GiB configured RAM (Docker reports
+2,053,652,480 bytes), no host directory mounts. Docker CLI/server 29.8.1/29.5.2,
+Compose 5.5.1, Linux ARM64. Neither Colima resources nor host tooling were changed.
+Both current images were built; the retained task-7.2 image was not reused as the
+current-source runtime. Airflow 3.3.2 runs Python 3.11.16; its upstream image digest
+was `sha256:a6685a7a708ed6fa910c2c05458d7f2b0db9cca5c3bf58a72ded389767ad3e65`.
+PostgreSQL remains 17.11 Bookworm. The project pins tags, not that observed digest.
+
+Offline commands (run narrow first, then the default suite):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python \
+  -m pytest -q -p no:cacheprovider docker/test_airflow.py \
+  --basetemp=/private/tmp/data-platform-task81/narrow
+PATH=/opt/homebrew/bin:$PATH DOCKER_CONFIG=$HOME/.config/data-platform/docker \
+  PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python \
+  docker/validate_compose.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python \
+  -m pytest -q -p no:cacheprovider \
+  --basetemp=/private/tmp/data-platform-task81/host-default
+```
+
+Results: **9 passed**, **8 Compose checks passed**, **459 passed / 83 skipped**.
+The host suite includes the original 450 tests plus nine infrastructure tests
+under `docker/`; the application image intentionally packages only `tests/`.
+The new tests cover private first initialization, repeat preservation, conflicting
+passwords, absent credentials, damaged state, migration failure and URI escaping.
+Compose checks cover default/tools/Airflow/init selection, allowlists, bindings,
+volume separation and non-root configuration. The old synthetic env-file check
+now verifies explicit shell schema selections while using `/dev/null` for every
+Compose invocation; explicit/legacy/conflicting schema semantics remain covered.
+
+For the exact live-container sequence, the external helpers were run with the
+same host Python and `PYTHONDONTWRITEBYTECODE=1`:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/driver.py baseline
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/driver.py build
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/driver.py init
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/driver.py start
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/driver.py stats
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/probe.py before
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/recreate.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/probe.py after
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/regression.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/ui_probe.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task81/export.py
+```
+
+`dc81` below abbreviates the driver's Compose prefix, with its private environment:
+
+```bash
+dc81() { docker compose --env-file /dev/null -p data-platform-task81-20261003-b91e \
+  -f /Users/patrick/Desktop/Code/data_platform/compose.yaml "$@"; }
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc81 build airflow-init
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc81 build runtime
+dc81 run --rm -T airflow-init
+dc81 --profile airflow up -d --wait --wait-timeout 240
+dc81 --profile airflow stop
+# Repeat with AIRFLOW_ADMIN_PASSWORD absent/empty; stored account must survive.
+dc81 run --rm -T airflow-init
+dc81 --profile airflow --profile airflow-init --profile tools down
+# Both Airflow password variables were empty for this default-start check.
+dc81 up -d --wait --wait-timeout 120
+# Restore only the metadata password, then recreate services.
+dc81 --profile airflow up -d --wait --wait-timeout 240
+```
+
+All five long-running services became healthy. Initialization migrated the new
+metadata database and exited zero; repeat migration also exited zero. Every
+container ID changed during recreation. A synthetic Airflow Variable persisted,
+as did exact hashes of the password/Fernet/JWT files; authenticated access still
+worked. Airflow processes run as UID 50000. The warehouse runtime remains UID
+10001. Actual container environments were checked privately for absence of source,
+warehouse (in Airflow), admin-password (outside init) and unrelated credentials.
+Metadata uses `airflow-postgres:5432/airflow`; warehouse uses `postgres:5432`.
+
+HTTP checks: UI/login HTML served, `/ui/config` returned 401 anonymously and 200
+with an authenticated JWT; `/api/v2/dags` rejected anonymous requests and returned
+zero DAGs with that JWT. Incorrect login returned 401; correct `/auth/token`
+returned 201. Tokens/passwords were never printed. This verifies the UI's HTTP
+authentication backend, not an automated browser interaction/visual test.
+Aggregate health reported healthy metadata, scheduler and DAG processor, with
+null triggerer. Separate `airflow db check`, scheduler/processor job checks and
+all Compose health checks passed. The Airflow `dag_run` and `task_instance` tables
+remained empty before and after validation; examples were disabled. No DAG/task
+execution or scheduling/retry behavior was added or tested.
+
+Two idle samples totaled approximately **641–659 MiB** across the five services.
+A sample during the enabled suite totaled about **842 MiB**, including its runtime;
+these are point samples, not measured peaks. Inspected service containers showed
+zero restarts and no OOM kills. The unchanged 2 GiB VM was sufficient for this
+infrastructure smoke and synthetic suite. Airflow's official recommendation remains
+at least 4 GB (Docker guide: ideally 8 GB); future pipeline capacity is unverified.
+No resize was needed or performed.
+
+Tools regressions passed with **Airflow credentials unset**: three
+`docker/validate_image.py` checks against the newly built runtime, CLI help,
+`dbt parse --no-partial-parse` (13 models, five sources, 46 tests), and
+`dbt debug --connection`. The latter is the correct slim-image probe. Warehouse
+relations and raw archives were empty before and after the synthetic suites;
+all disposable schemas were removed. Narrow then full commands:
+
+```bash
+dc81 run -T --name data-platform-task81-20261003-b91e-narrow-integration \
+  -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=10 --basetemp=/tmp/narrow-integration \
+  tests/integration/test_ingestion_postgres.py
+dc81 run -T --name data-platform-task81-20261003-b91e-full-enabled \
+  -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=10 --basetemp=/tmp/full-enabled
+```
+
+With `RUN_POSTGRES_INTEGRATION=1`, results were **15 passed in 1.02s** and
+**533 passed in 285.72s**. All 65 dbt behavior scenarios and three full-project
+schema modes remain; the full-project tests retain 13 models and 46 dbt tests.
+This is new synthetic evidence, not a repeat of task 7.5's live-source workflow.
+Test artifacts were exported from stopped containers before removing them.
+
+Before cleanup, exports retained metadata SQL (without role passwords), private
+configuration/keys, Airflow file/service logs, dbt parse output, empty archive
+storage, resource/image inventories, authentication/health/state summaries and
+command results. Raw service logs were privately checked for all generated
+passwords and keys; none appeared. Dumps/configuration were exported, not restore-tested.
+Cleanup uses all relevant profiles so no profile-owned volumes are overlooked:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python \
+  /private/tmp/data-platform-task81/cleanup.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python \
+  /private/tmp/data-platform-task81/host_review.py
+git diff --check
+```
+
+The cleanup helper runs `dc81 --profile airflow --profile airflow-init --profile tools
+down --volumes`, removes only the two task image tags and the newly pulled Airflow
+base image, verifies the original Docker inventories, then stops Colima. Native
+PostgreSQL was never started. Prior edits, `.env`, archives/history, the 26 previously
+reported tracked generated artifacts, native data, Docker configuration and Git
+index are preserved. Build-cache layers may remain; no pruning or index/history
+cleanup was performed. Only roadmap **8.1** is newly complete; **8.2–8.6**, Phase 8's
+end-to-end exit criterion and all later phases remain incomplete.
+
+Final review repeated the default host command with
+`--basetemp=/private/tmp/data-platform-task81/host-final`: **459 passed / 83 skipped
+in 2.03s**. `doc_review.py` verified 204 relative links/anchors and that 8.1 is the
+only newly checked task; `host_review.py` verified Bash syntax, whitespace, the
+unchanged Git index, 12,851 unchanged repository files and 1,330 external fingerprints.
+The task-only diff contains ten modified files and four new infrastructure/test
+files. `.env.example` retains its original edited content as an exact prefix;
+the pre-existing `.gitignore` and root `.dockerignore` edits are untouched. Final
+Docker container/volume/network/image inventories match the baseline exactly.
+`colima list` reports Stopped; both Homebrew services report Running/Loaded/Schedulable
+false; native readiness reports no response (expected exit 2).
+
+## Task 8.2 ingestion DAG verification
+
+Verified October 3, 2026. This is new **synthetic task-8.2 evidence**, not a repeat
+of Phase 7's live IGDB runs or an end-to-end ingestion → dbt Airflow pipeline.
+No source credentials were loaded and no Twitch/IGDB requests occurred.
+
+Private evidence and temporary validation helpers are in
+`/private/tmp/data-platform-task82/` (0700). The baseline includes repository-file
+hashes, copies for a task-only diff, external/native fingerprints and the Git-index
+hash. `commands.jsonl` records exact Docker/Compose argument arrays, with separate
+redacted output logs. `task-only.diff` compares against the pre-task working tree,
+including the prior uncommitted task-8.1 implementation. Exports include private
+Airflow keys/account files: do not publish this evidence directory.
+
+Isolation used project `data-platform-task82-20261003-c82f`, previously unused
+loopback ports 55482/58082, generated private database/admin passwords, and genuinely
+new project volumes. Every Compose command used `--env-file /dev/null`; the driver
+supplied an explicit environment and never read `.env`. `isolation.yaml` made the
+validation network internal-only. Because that blocks host forwarding, initial
+API authentication/triggers ran inside the API container. After synthetic runs and
+removal of the test double, container replacement used ordinary networking to
+verify actual host-loopback UI/API authentication, without another ingestion run.
+No host mounts, privileged containers, Docker socket mounts or tooling changes.
+
+Host checks used the existing Python environment, bytecode disabled and no pytest
+cache. Narrow checks preceded the default suite:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider docker/test_ingestion_dag.py docker/test_airflow.py --basetemp=/private/tmp/data-platform-task82/narrow
+PATH=/opt/homebrew/bin:$PATH DOCKER_CONFIG="$HOME/.config/data-platform/docker" PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_compose.py
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --basetemp=/private/tmp/data-platform-task82/host-default
+```
+
+Results: **11 passed**, **nine Compose checks passed**, **461 passed / 83 skipped**.
+The final default suite was repeated after documentation changes with
+`--basetemp=/private/tmp/data-platform-task82/host-final`. Offline wiring tests do
+not install Airflow on the host. Actual SDK/operator/image checks ran separately:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_airflow.py data-platform-task82-20261003-c82f-airflow:3.3.2
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_image.py data-platform-task82-20261003-c82f-runtime:latest
+```
+
+With the documented Docker environment, these passed **two** and **three** checks.
+The Airflow check uses `docker run --network none`: real SDK DAG import, exactly
+one task, fixed command/cwd, no dependency edges, real BashOperator exit handling
+for 0/1/99 with a subprocess-boundary double, packaged-source hashes, UID 50000,
+archive write permission and application-only dependency resolution. Airflow/dbt/
+pytest are absent from the app venv. The first check found bytecode writes during
+direct image use; the image now disables bytecode globally and rebuilt checks pass.
+The deployed base supplies Airflow 3.3.2/Python 3.11.16 and standard provider 1.19.0.
+Airflow 3 public imports and operator parameters were checked against official
+[SDK guidance](https://airflow.apache.org/docs/apache-airflow/3.3.2/public-airflow-interface.html)
+and [BashOperator documentation](https://airflow.apache.org/docs/apache-airflow-providers-standard/stable/_api/airflow/providers/standard/operators/bash/index.html),
+then verified against the actual bundled provider. Application constraints remain
+bounded, not locked; base tags are not immutable digests.
+
+The temporary driver entry commands were run with the same Python and
+`PYTHONDONTWRITEBYTECODE=1`:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/driver.py baseline
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/driver.py build
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/prepare.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/isolation_check.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/execute.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/regression.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/driver.py stats
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/persistence.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/export.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/cleanup.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task82/host_review.py
+```
+
+The preparation helper's first environment inspection needed to ignore Docker's
+bare unset-variable entries; the corrected isolation check passed. The first host
+API attempt was refused by the internal-only network; the container-local probe
+then passed. Neither issue required a production workaround.
+
+`dc82` abbreviates the private driver's prefix below; its first validation stages
+also appended `-f /private/tmp/data-platform-task82/isolation.yaml`:
+
+```bash
+dc82() { docker compose --env-file /dev/null -p data-platform-task82-20261003-c82f -f /Users/patrick/Desktop/Code/data_platform/compose.yaml "$@"; }
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc82 build airflow-init
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc82 build runtime
+# Both Airflow passwords absent for ordinary PostgreSQL startup/tools probes:
+dc82 up -d --wait --wait-timeout 120
+# Restore the generated metadata/admin settings only for explicit init:
+dc82 run --rm -T airflow-init
+# Repeat without the admin password, preserving stored account/keys:
+dc82 run --rm -T airflow-init
+dc82 --profile airflow up -d --wait --wait-timeout 240
+dc82 exec -T airflow-scheduler airflow dags list-import-errors -o json
+dc82 exec -T airflow-scheduler airflow dags list -o json
+```
+
+Discovery reported no import errors, exactly `igdb_ingestion`, initially paused,
+and zero prior runs. Source/warehouse settings were absent from API/processor/init;
+only the scheduler had warehouse settings. No actual source credentials were
+supplied anywhere. Explicit/legacy/default source-schema resolution passed in
+fresh app processes, independently of `DBT_SCHEMA`. All Airflow components use the
+same baked DAG image. No dbt or example DAG/task was introduced.
+
+For actual execution, `execute.py` copied an external `sitecustomize.py` into only
+the disposable scheduler's application venv. It replaced `requests.Session.request`
+with controlled OAuth/IGDB responses, supplied dummy source values, asserted UID
+50000/app interpreter, and rejected unexpected HTTP calls. The internal-only
+network additionally prevented external egress. It changed no repository/image
+code, DAG command, pagination, storage helper or workflow behavior. An authenticated
+API trigger ran the exact `exec /opt/airflow/app-venv/bin/python -m
+src.ingestion.run_ingestion --entity all` command through LocalExecutor.
+
+The first run succeeded: five single-row JSONL archives matched five PostgreSQL
+raw rows, five history records had 1/1 acknowledged counts, and the three
+incremental entities published eligible synthetic cutoffs. A second trigger with
+an injected source exception failed the task and DAG, recorded games failed with
+0/0 counts and no cutoff, and did not start later entities. The temporary double
+was removed, the DAG paused, and subsequent replacement containers were clean.
+No arbitrary CLI override or test mode was added to production code.
+
+Standalone tools probes passed with Airflow credentials unset:
+
+```bash
+dc82 run --rm -T runtime dbt debug --connection
+dc82 run --rm -T --no-deps runtime python -m src.ingestion.run_ingestion --help
+dc82 run --rm -T --no-deps runtime dbt parse --no-partial-parse
+# RUN_POSTGRES_INTEGRATION=1 supplied explicitly for both following commands:
+dc82 run -T --name data-platform-task82-20261003-c82f-narrow-integration -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=10 --basetemp=/tmp/narrow-integration tests/integration/test_ingestion_postgres.py
+dc82 run -T --name data-platform-task82-20261003-c82f-full-enabled -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=10 --basetemp=/tmp/full-enabled
+```
+
+Results: **15 passed in 1.01s**, then **533 passed in 287.43s**. The app image
+contains the existing application tests; host-only infrastructure tests explain
+the different default totals. Database tests used synthetic fixtures/disposable
+schemas, removed afterward. Parsing retained 13 models, five sources and 46 tests.
+These dbt regressions ran as standalone tools commands, not Airflow tasks.
+
+Container replacement preserved exact hashes of Airflow archives/account/keys,
+synthetic warehouse rows/history and both visible DAG-run states. Repeat migration,
+correct/incorrect/anonymous login, UI configuration protection, metadata connectivity,
+API/scheduler/processor health and zero OOM/restart checks passed. All five service
+containers were replaced. A post-DAG memory sample totaled about 799 MiB; a sample
+during the full suite about 1,065 MiB across six containers. These are point samples,
+not peaks. The unchanged 2 CPU/2 GiB VM sufficed for this tiny synthetic workload;
+Airflow's at-least-4-GB recommendation and real workload capacity caveat remain.
+
+Evidence was exported before cleanup: task logs, private config, metadata and
+warehouse dumps, five synthetic archives, dbt/test artifacts, resource/image
+inventories and preservation reports. Task logs confirm the exact interpreter/
+command and success/failure; generated credentials were absent from service/task
+logs. Exports are not a tested restore procedure. Cleanup enabled all profiles:
+
+```bash
+dc82 --profile airflow --profile airflow-init --profile tools down --volumes
+git diff --check
+```
+
+Only task-created containers/network/volumes/image tags and the newly pulled
+Airflow base tag were removed. Original Docker inventories matched afterward;
+no prune was used. Colima and native PostgreSQL were left stopped/unregistered.
+`.env`, prior edits, existing archives/history, 26 tracked generated artifacts,
+native data, Docker configuration and Git index were preserved. Only roadmap 8.2
+was newly checked; 8.3–8.6, Phase 8's exit criterion and later phases remain open.
+
+## Task 8.3 dbt task verification
+
+Verified October 3, 2026. This is new **synthetic task-8.3 evidence**, separate
+from Phase 7's live-source results and tasks 8.1–8.2. It does not complete task
+8.6 or Phase 8's exit criterion. No source credentials were loaded and no actual
+Twitch/IGDB requests occurred.
+
+Private baseline copies, command records, helpers, exports and the task-only diff
+are in `/private/tmp/data-platform-task83/` (0700). The directory contains generated
+credentials and exported Airflow keys/account files; do not publish it. Isolation
+used project `data-platform-task83-20261003-d83a`, unused loopback ports 55483/58083,
+generated passwords and eight genuinely new project-owned volumes. Repository
+`.env` was never read. All project Compose operations used `--env-file /dev/null`.
+An initial version-only `docker compose version` query omitted that flag; the
+helper was corrected. That query did not resolve project settings or start services.
+The validation network was internal-only through synthetic execution and tests.
+
+Host checks, with narrow tests first:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider docker/test_ingestion_dag.py docker/test_airflow.py --basetemp=/private/tmp/data-platform-task83/narrow
+PATH=/opt/homebrew/bin:$PATH DOCKER_CONFIG="$HOME/.config/data-platform/docker" PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_compose.py
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --basetemp=/private/tmp/data-platform-task83/host-default
+```
+
+Results: **11 passed**, **nine Compose checks passed**, **461 passed / 83 skipped**.
+The host suite includes infrastructure checks; the tools image packages the
+application tests only. Offline DAG checks assert exactly two constructors, their
+commands/cwd/exit/XCom settings and the single edge, without installing Airflow.
+Compose checks cover scheduler-only dbt configuration, schema selection and
+separate artifact storage, preserving default/tools behavior.
+
+Both images were built from current source, then checked against actual packaged
+bytes and interpreters. No retained image or cache was accepted as validation.
+With the documented Docker environment, the image commands were:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_airflow.py data-platform-task83-20261003-d83a-airflow:3.3.2
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_image.py data-platform-task83-20261003-d83a-runtime:latest
+```
+
+Both passed **three checks**. Airflow checks use `--network none`: real DAG import,
+exactly `ingest_all` → `dbt_build`, default `all_success`, no examples, fixed absolute
+executables/project/profile/cwd, XCom disabled, zero retries, and real BashOperator
+handling of 0/1/2/99 with a subprocess-boundary double. Source/dbt hashes match the
+repository, and UID 50000 can write archive/artifact directories. dbt resolves
+inside `/opt/airflow/app-venv`; Airflow/pytest are absent there. Both interpreter
+`pip check` commands pass. The standalone context/image checks preserve UID 10001,
+private/generated-file exclusions, source parity and offline default help.
+
+Resolved versions: Airflow **3.3.2**, Python **3.11.16**, standard provider **1.19.0**,
+dbt Core **1.12.5**, dbt-postgres **1.11.0**. Behavior was checked against official
+[Airflow 3.3.2 dependency/trigger documentation](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/dags.html#trigger-rules),
+[BashOperator documentation](https://airflow.apache.org/docs/apache-airflow-providers-standard/stable/_api/airflow/providers/standard/operators/bash/index.html),
+and dbt's [build](https://docs.getdbt.com/reference/commands/build),
+[exit-code](https://docs.getdbt.com/reference/exit-codes),
+[artifact](https://docs.getdbt.com/reference/global-configs/json-artifacts) and
+[log](https://docs.getdbt.com/reference/global-configs/logs) contracts, then exercised
+against these installed versions. Dependency ranges remain bounded, not locked.
+
+The exact external entry commands used the existing host Python and bytecode
+suppression (individual Docker/Compose argument arrays are in `commands.jsonl`):
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/driver.py baseline
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/driver.py build
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/prepare.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/execute.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/regression.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/driver.py stats
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/schema_modes.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/persistence.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/final_audit.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/export.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/cleanup.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task83/host_review.py
+```
+
+`dc83` abbreviates the driver's private environment and prefix:
+
+```bash
+dc83() { docker compose --env-file /dev/null -p data-platform-task83-20261003-d83a -f /Users/patrick/Desktop/Code/data_platform/compose.yaml "$@"; }
+# Build/start/test stages also use -f /private/tmp/data-platform-task83/isolation.yaml.
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc83 build airflow-init
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc83 build runtime
+# Both Airflow password variables empty for default-start/tools checks:
+dc83 up -d --wait --wait-timeout 120
+# Generated metadata/admin passwords supplied only for explicit initialization:
+dc83 run --rm -T airflow-init
+# Repeat without admin password, then start all services:
+dc83 run --rm -T airflow-init
+dc83 --profile airflow up -d --wait --wait-timeout 240
+dc83 exec -T airflow-scheduler airflow dags list-import-errors -o json
+dc83 exec -T airflow-scheduler airflow dags list -o json
+dc83 run --rm -T runtime dbt debug --connection
+dc83 run --rm -T --no-deps runtime python -m src.ingestion.run_ingestion --help
+dc83 run --rm -T --no-deps runtime dbt parse --no-partial-parse
+# RUN_POSTGRES_INTEGRATION=1 supplied explicitly for both commands:
+dc83 run -T --name data-platform-task83-20261003-d83a-narrow-integration -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=10 --basetemp=/tmp/narrow-integration tests/integration/test_ingestion_postgres.py
+dc83 run -T --name data-platform-task83-20261003-d83a-full-enabled -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=10 --basetemp=/tmp/full-enabled
+```
+
+The test driver injects an external `sitecustomize.py` only into the disposable
+scheduler's application environment. It doubles `requests.Session.request`,
+returns controlled OAuth/entity responses, rejects unexpected requests and checks
+the app interpreter/UID. The internal-only network also prevents external access.
+Production code, DAG commands, storage, dbt SQL/tests and scheduling behavior are
+unchanged by the harness. Authenticated API triggers executed actual LocalExecutor
+tasks; the double was removed and DAG paused afterward.
+
+| Synthetic run | Ingestion | dbt | DAG | Evidence |
+|---|---|---|---|---|
+| Success | success | success | success | 13 models/46 tests; explicit raw schema wins over conflicting legacy; independent output schema |
+| Source failure | failed | upstream_failed | failed | dbt has zero attempts; all artifact hashes unchanged |
+| dbt test failure | success | failed | failed | A synthetic NULL genre member fails the existing `not_null` test; 11 models succeed, 38 tests pass, one fails, nine resources skip |
+| Recovery | success | success | success | Valid synthetic payload restores 13 models/46 passing tests |
+
+Task timestamps prove dbt starts after ingestion finishes. Exports retain each
+executed dbt invocation's manifest, run results, SQL and logs. Result arguments
+confirm absolute paths, the persistent target/log directories and disabled usage
+reporting. Queries reconcile synthetic raw rows, fifteen JSONL archives, sixteen
+history records (fifteen successes/one failure), model counts, catalog values,
+relationship pairs, release year and performance metrics. Separately, the scheduler's
+actual dbt executable builds all 13 models/46 tests in each of default, legacy and
+explicit-over-legacy source modes with independent output schemas; all disposable
+schemas are removed. These are synthetic checks, not live-source validation.
+
+Standalone tools regressions ran with Airflow credentials unset: CLI help,
+`dbt parse --no-partial-parse`, `dbt debug --connection`, **15 ingestion integration
+tests in 0.98s**, and **533 enabled application tests in 272.97s** all passed.
+The suite retains 65 dbt behavior scenarios and three full-project schema modes.
+Test artifacts were exported before removing the one-off containers. No disposable
+test schemas or tools archives remained; only the task's synthetic warehouse
+schemas existed. These results do not repeat Phase 7's live-source validation.
+
+Container removal/recreation preserved exact hashes of Airflow dbt artifacts/logs,
+archives and account/keys, plus a digest of every row in all synthetic raw/history/
+model relations. All five service IDs changed. Repeat migration, host-loopback
+UI/API login, rejected anonymous/wrong-password requests, protected UI configuration,
+metadata connection and scheduler/processor health passed. The DAG remained paused
+with four retained runs and only its two intended tasks. All Airflow components
+use the same current image. Environment/mount inspections confirmed only the
+scheduler receives dbt/warehouse settings and the Airflow artifact volume. The
+temporary source double and source credential variables were absent after testing.
+
+Point samples totaled about **811 MiB** after the DAG scenarios and **1,075 MiB**
+during the full suite, including its tools container. Every service had zero
+restarts and no OOM kills. The unchanged 2 CPU/2 GiB VM sufficed for these tiny
+synthetic checks; these are not peak measurements or evidence of live pipeline
+capacity. No resize, host mounts, privileged containers or Docker socket mounts
+were used. Source/dbt commands retain their existing failure/partial-write
+semantics; target artifacts describe the latest build rather than permanent
+per-run storage. The synthetic dbt failure did not roll back ingestion history.
+
+Before cleanup, exports retained Airflow task/service logs and private config,
+warehouse/metadata SQL dumps, synthetic archives, Airflow/tools dbt artifacts,
+pytest artifacts, run/task states and resource/image inventories. Generated
+passwords/keys were absent from service/task/dbt logs. Exports are not a tested
+restore procedure. Cleanup enabled every relevant profile:
+
+```bash
+dc83 --profile airflow --profile airflow-init --profile tools down --volumes
+git diff --check
+```
+
+Only task-created containers/network/volumes/image tags and the newly pulled
+Airflow base tag were removed. Original Docker inventories matched exactly;
+no prune was performed and build cache may remain. Colima and native PostgreSQL
+are stopped/unregistered. Prior edits, `.env`, archives/history, the 26 previously
+reported tracked generated artifacts, native data, Docker configuration and Git
+index are preserved. No repository file was deleted or untracked, and no commit
+was made. The task-only change modifies sixteen files and creates no repository
+files. Final host verification repeats the default command above with
+`--basetemp=/private/tmp/data-platform-task83/host-final`: **461 passed / 83 skipped
+in 1.93s**. `doc_review.py` verified **228 local links/anchors** and that only 8.3
+is newly checked. `host_review.py` verified Bash syntax, whitespace, the unchanged
+Git index, **12,853 unchanged repository files** and **1,330 external fingerprints**.
+Both helpers were run with the same host Python and `PYTHONDONTWRITEBYTECODE=1`.
+Only **8.3** is newly complete; **8.4–8.6**, Phase 8's exit criterion and all later
+phases remain incomplete.
+
+## Task 8.4 dependency, retry and failure verification
+
+Verified October 3, 2026. These are **new synthetic task-8.4 results**, separate
+from Phase 7's live-source evidence and tasks 8.1–8.3. No source credentials were
+loaded and no Twitch/IGDB request left the validation network. Task 8.6 and
+Phase 8's exit criterion remain incomplete.
+
+The only runtime change is the DAG's shared built-in `default_args`: one retry,
+a fixed one-minute delay, exponential backoff disabled, and explicit `all_success`.
+Exactly two tasks and their single edge, exact commands/interpreters/cwd,
+nonzero-exit failures, disabled XCom, manual schedule and initial pause are retained.
+Offline constructor checks and the actual installed SDK/operator validate these
+settings. The actual Airflow image matches repository DAG/source/dbt bytes;
+application dependencies remain isolated, without Airflow or pytest.
+
+Official Airflow 3.3.2 [task/retry behavior](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/tasks.html),
+[default arguments and trigger rules](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/dags.html#trigger-rules),
+and [leaf-task DAG status/history](https://airflow.apache.org/docs/apache-airflow/3.3.2/core-concepts/dag-run.html#dag-run-status)
+were checked against real execution. The provider's current BashOperator reference
+is newer than the installed 1.19.0; the installed operator was separately tested
+with subprocess results 0/1/2/99. Resolved versions remain Airflow 3.3.2, standard
+provider 1.19.0, dbt Core 1.12.5 and dbt-postgres 1.11.0.
+
+Isolation used project `data-platform-task84-20261003-e84b`, unused loopback ports
+55484/58084, generated private credentials and eight new project-owned volumes.
+All Compose calls used `--env-file /dev/null`. Both images were built from current
+source and then validated; retained images were not accepted as proof. The
+synthetic execution and integration suites used an internal-only network.
+Private baseline files/hashes, command records, helpers, per-attempt exports and
+the task-only diff are in `/private/tmp/data-platform-task84/` (0700). This directory
+contains generated credentials and exported account/keys; do not publish it.
+
+Host checks used the required interpreter, bytecode suppression and no pytest cache:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider docker/test_ingestion_dag.py docker/test_airflow.py --basetemp=/private/tmp/data-platform-task84/narrow-baseline
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider docker/test_ingestion_dag.py docker/test_airflow.py --basetemp=/private/tmp/data-platform-task84/narrow
+PYTHONDONTWRITEBYTECODE=1 PYTHON_DOTENV_DISABLED=1 /private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider --basetemp=/private/tmp/data-platform-task84/host-default
+```
+
+Results: **11 narrow passes before and after**, then **461 passed / 83 skipped**.
+The final host run uses the same full command with `--basetemp` ending in
+`host-final`. Infrastructure/image checks are separate: **nine Compose checks**,
+**three Airflow image checks**, and **three standalone image checks** passed.
+
+Exact external validation entry commands (the driver records full Docker argument
+arrays in `commands.jsonl` and supplies only its generated/allowlisted environment):
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/driver.py baseline
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/driver.py config
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/driver.py build
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/prepare.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/execute.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/regression.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/driver.py stats
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/attempt_audit.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/final_audit.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/persistence.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/export.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/cleanup.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/host_review.py
+/private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task84/doc_review.py
+```
+
+`execute.py` initially stopped after the first successful automatic retry because
+the temporary comparison named `game_count` instead of the model's `release_count`.
+An intermediate correction also mistook the year representation. Both were harness
+assertions, with no production changes. The corrected continuation verified the
+retained completed run and executed only the three remaining scenarios. No task
+was cleared or retriggered. A later embedded audit had a SQL-string quoting error;
+it was corrected before rerunning the read-only audit. The initial helper and audit-error log are retained with the evidence.
+
+The driver uses this Compose prefix with its private environment:
+
+```bash
+dc84() { docker compose --env-file /dev/null -p data-platform-task84-20261003-e84b -f /Users/patrick/Desktop/Code/data_platform/compose.yaml -f /private/tmp/data-platform-task84/isolation.yaml "$@"; }
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc84 build airflow-init
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc84 build runtime
+# No Airflow credentials for ordinary startup or tools commands:
+dc84 up -d --wait --wait-timeout 120
+# Generated metadata/admin credentials supplied only for explicit init:
+dc84 run --rm -T airflow-init
+# Repeated without the admin password, preserving stored account/keys:
+dc84 run --rm -T airflow-init
+dc84 --profile airflow up -d --wait --wait-timeout 240
+dc84 exec -T airflow-scheduler airflow dags list-import-errors -o json
+dc84 exec -T airflow-scheduler airflow dags list -o json
+dc84 run --rm -T runtime dbt debug --connection
+dc84 run --rm -T --no-deps runtime python -m src.ingestion.run_ingestion --help
+dc84 run --rm -T --no-deps runtime dbt parse --no-partial-parse
+# RUN_POSTGRES_INTEGRATION=1 supplied explicitly to both commands:
+dc84 run -T --name data-platform-task84-20261003-e84b-narrow-integration -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=10 --basetemp=/tmp/narrow-integration tests/integration/test_ingestion_postgres.py
+dc84 run -T --name data-platform-task84-20261003-e84b-full-enabled -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=10 --basetemp=/tmp/full-enabled
+```
+
+Image checks run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_airflow.py data-platform-task84-20261003-e84b-airflow:3.3.2
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_image.py data-platform-task84-20261003-e84b-runtime:latest
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_compose.py
+```
+ The driver supplies the existing isolated Docker
+configuration/socket, never changes `~/.docker`, and does not install host tools.
+
+The external scheduler-only `sitecustomize.py` doubles `requests.Session.request`,
+returns tiny controlled source responses and rejects unexpected requests. It
+leaves ingestion/storage/retry logic, DAG policy, command paths and dbt definitions
+unchanged. Companies returns 503 on three HTTP attempts within each failing
+CLI attempt; games/genres/platforms already committed. The recovering command's
+second Airflow attempt returns valid responses. dbt failures use a synthetic NULL
+genre member that fails the existing `not_null` test. Only the recovering dbt
+scenario repairs that disposable raw payload during the automatic retry wait,
+after exporting the failed attempt. The DAG is paused and the double removed
+after the four runs.
+
+| Scenario | Ingestion attempts / final state | dbt attempts / final state | DAG | Retry gap |
+|---|---|---|---|---|
+| Ingestion recovers | 2 / success | 1 / success | success | 60.645661s |
+| Ingestion exhausted | 2 / failed | 0 / upstream_failed | failed | 60.059736s |
+| dbt recovers | 1 / success | 2 / success | success | 60.385799s |
+| dbt exhausted | 1 / success | 2 / failed | failed | 60.222519s |
+
+Every scenario observed `up_for_retry` after attempt one with the DAG still running.
+When ingestion waited, dbt remained unstarted; executed dbt tasks started after
+successful ingestion. Timing compares first-attempt end to second-attempt start,
+using the actual 60-second policy with no overrides. All **11 executed attempt
+logs** were readable through the authenticated API; XCom row count remained zero.
+The two successful builds each produced **13 models / 46 passing tests**. All
+five dbt invocations were exported before later builds overwrote targets, including
+both failed first attempts and the terminal failed build.
+
+Real PostgreSQL queries verified one row per source key, fresh 24-hour-overlap
+windows from earlier committed cutoffs, retained earlier entity commits/history,
+NULL ends on failed/reference runs, **27 history rows (24 succeeded / three
+failed)** and **24 archives**. dbt retries did not repeat ingestion or change its
+history. Synthetic catalog, relationship, release-year and every performance/
+company-output metric matched expected values. Explicit raw schema won over a
+conflicting legacy value; dbt output schema stayed independent. Ingestion
+exhaustion left curated table snapshots unchanged. The full integration suite
+separately retains all three source-schema configuration modes and existing
+transaction/checkpoint failure cases with disposable schemas.
+
+Standalone tools passed `dbt debug --connection` (the slim-runtime authentication
+probe), CLI help and offline dbt parsing without Airflow/source credentials.
+The narrow database suite passed **15 tests in 1.35s**, then the full enabled
+application suite passed **533 tests in 285.26s**. All synthetic test schemas were
+removed and pytest artifacts exported before test-container removal. Both Airflow
+and application `pip check` passed. Scheduler-only settings, `postgres:5432`,
+independent schemas, UID-50000 Airflow storage and UID-10001 tools storage remain
+intact. No production source/storage/dbt SQL, requirements, build configuration,
+Compose settings or environment examples changed in task 8.4.
+
+Container replacement preserved exact warehouse row digests and file hashes for
+archives, dbt targets/logs and private account/keys. All five service container IDs
+changed. Repeat initialization, rejected anonymous/wrong-password requests,
+authenticated host-loopback UI/API, metadata connection, scheduler/processor
+heartbeats and all service health checks passed. The paused DAG retained four
+runs: two succeeded and two failed. After the HTTP double was removed, the
+persistence/UI check reopened only the task project on its normal network;
+no further ingestion was triggered and source credentials remained absent.
+
+Point samples totaled about **881 MiB** during retry validation and **1,031 MiB**
+with the full-suite tools container. Services had zero restarts and no OOM kills.
+The existing 2 CPU/2 GiB Colima profile was not resized/recreated and has no host
+mounts. These are point samples and tiny synthetic workloads, not peak-memory
+measurements or proof of live pipeline capacity. Whole-command retries bound the
+attempt count, not total pipeline duration. Shared artifacts still overwrite,
+and failures do not provide a transaction across entities or dbt models.
+
+Before cleanup, evidence exports retained task/service/API logs, all dbt attempts,
+archives, private account/keys, warehouse/metadata SQL dumps, pytest artifacts,
+state timelines and resource/image inventories. Generated passwords/keys were
+absent from checked service/task/dbt logs. Exports are not a tested restore process.
+Cleanup selected every relevant profile (using the same project/environment and
+base Compose file, after the replacement check removed the isolation override):
+
+```bash
+docker compose --env-file /dev/null -p data-platform-task84-20261003-e84b -f /Users/patrick/Desktop/Code/data_platform/compose.yaml --profile airflow --profile airflow-init --profile tools down --volumes
+git diff --check
+```
+
+Only task-created containers/network/volumes, two project image tags and the
+newly pulled Airflow base tag were removed. Original Docker inventories match
+exactly; no prune was performed and build cache may remain. Colima and native
+PostgreSQL are stopped/unregistered; native port 5432 reports no response.
+Baseline comparison preserves prior edits, `.env`, local data/archives/history,
+the 26 previously reported tracked artifacts, native database files, Docker
+configuration and Git index. Task 8.4 modifies eleven existing working-tree files,
+creates no repository files, and leaves **12,858 repository files** and **1,330
+external fingerprints** unchanged. No commit, deletion or untracking occurred.
+Only roadmap **8.4** is newly complete; **8.5–8.6**, Phase 8's exit criterion and
+later phases remain incomplete.
+
+Final host verification after documentation updates and shutdown: **461 passed /
+83 skipped in 1.95s**. `doc_review.py` checked **235 local links/anchors** and
+confirmed only 8.4 was newly checked; `host_review.py` passed task-only diff,
+protected-file/index preservation, Bash syntax and whitespace checks.

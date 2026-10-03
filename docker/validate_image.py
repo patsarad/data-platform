@@ -57,6 +57,8 @@ class ImageChecks(unittest.TestCase):
     def test_exclusions_with_nested_sentinels(self):
         """Local/private files must be absent even beneath allowed directories."""
         allowed = {"requirements.txt", "src/__init__.py", "src/utils/config.py",
+                   "docker/airflow/bootstrap.py", "docker/airflow/requirements-ingestion.txt",
+                   "dags/igdb_ingestion.py",
                    "tests/integration/conftest.py", "dbt/profiles.yml",
                    "dbt/dbt_project.yml", "dbt/models/staging/model.sql",
                    "dbt/models/staging/schema.yml", "dbt/tests/check.sql",
@@ -88,12 +90,14 @@ class ImageChecks(unittest.TestCase):
     def test_real_context_and_image_source_parity(self):
         """Only intended definitions reach Docker; the image contains those bytes."""
         expected = {"requirements.txt", "dbt/dbt_project.yml", "dbt/profiles.yml"}
+        context_only = {"docker/airflow/bootstrap.py", "docker/airflow/requirements-ingestion.txt",
+                        "dags/igdb_ingestion.py"}
         for tree in ("src", "tests"):
             expected.update(str(p.relative_to(ROOT)) for p in (ROOT / tree).rglob("*.py"))
         for tree in ("models", "tests", "macros"):
             for suffix in (("*.sql", "*.yml") if tree == "models" else ("*.sql",)):
                 expected.update(str(p.relative_to(ROOT)) for p in (ROOT / "dbt" / tree).rglob(suffix))
-        self.assertEqual(context_files(ROOT), expected)
+        self.assertEqual(context_files(ROOT), expected | context_only)
         hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                   for name in expected}
         check = """

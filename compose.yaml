@@ -1,5 +1,41 @@
 name: data-platform-postgres
 
+x-airflow-common: &airflow-common
+  profiles: [airflow]
+  image: ${COMPOSE_PROJECT_NAME:-data-platform-postgres}-airflow:3.3.2
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  user: "50000:0"
+  environment: &airflow-environment
+    # Empty defaults allow PostgreSQL/tools use without Airflow credentials.
+    # The URI helper rejects an empty password when Airflow actually starts.
+    AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_CMD: python /opt/airflow/local/bootstrap.py database-uri
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__PARALLELISM: "1"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "false"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/config/passwords.json
+    AIRFLOW__CORE__FERNET_KEY_CMD: cat /opt/airflow/config/fernet-key
+    AIRFLOW__API_AUTH__JWT_SECRET_CMD: cat /opt/airflow/config/jwt-secret
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__API__WORKERS: "1"
+    AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: "1"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+    PYTHONDONTWRITEBYTECODE: "1"
+  volumes:
+    - airflow_config:/opt/airflow/config
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+  stop_grace_period: 30s
+
 services:
   postgres:
     image: postgres:17.11-bookworm
@@ -44,7 +80,98 @@ services:
       - raw_archives:/app/data/raw
       - dbt_artifacts:/tmp/dbt
 
+  airflow-postgres:
+    profiles: [airflow, airflow-init]
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-}
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+
+  airflow-init:
+    <<: *airflow-common
+    profiles: [airflow-init]
+    entrypoint: ["/usr/bin/dumb-init", "--", "python", "/opt/airflow/local/bootstrap.py"]
+    command: [init]
+    environment:
+      <<: *airflow-environment
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-}
+
+  airflow-api-server:
+    <<: *airflow-common
+    # Require the explicit initialization step before SimpleAuthManager can
+    # generate a password and print it in service logs.
+    command: [bash, -c, "test -s /opt/airflow/config/passwords.json && exec airflow api-server"]
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://localhost:8080/api/v2/version]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    environment:
+      <<: *airflow-environment
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB externally}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER externally}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD externally}
+      POSTGRES_RAW_SCHEMA:
+      POSTGRES_SCHEMA:
+      LOG_LEVEL:
+      igdb_client_id:
+      igdb_client_secret:
+      DBT_SCHEMA:
+      DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+      DBT_TARGET_PATH: /opt/airflow/dbt-artifacts/target
+      DBT_LOG_PATH: /opt/airflow/dbt-artifacts/logs
+    volumes:
+      - airflow_config:/opt/airflow/config
+      - airflow_logs:/opt/airflow/logs
+      - airflow_raw_archives:/opt/airflow/app/data/raw
+      - airflow_dbt_artifacts:/opt/airflow/dbt-artifacts
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://localhost:8974/health]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: [CMD, airflow, jobs, check, --job-type, DagProcessorJob, --local]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
 volumes:
   postgres_data:
   raw_archives:
   dbt_artifacts:
+  airflow_postgres_data:
+  airflow_config:
+  airflow_logs:
+  airflow_raw_archives:
+  airflow_dbt_artifacts:

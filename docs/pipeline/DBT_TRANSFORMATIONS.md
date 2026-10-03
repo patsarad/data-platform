@@ -588,3 +588,19 @@ dbt build
 ```
 
 It builds five staging views, three relationship views, and five mart tables (`mart_game_catalog`, `mart_release_trends`, `mart_genre_performance`, `mart_platform_performance`, `mart_company_output`), running 46 tests: ten source, ten staging identifier, eight relationship, four catalog, five release-trend, six performance, and three company-output. Task 6.8 verified all thirteen models and 80 documented columns against existing local data, including every earlier comparison and exact company-output metrics independently derived from source-model values. See [verification and limitations](../engineering/TESTING.md#task-68-mart-contract-audit-verification). Rebuild all five marts after ingestion because they are table snapshots.
+
+Task 8.3 also invokes this same build after successful ingestion in the manual
+Airflow DAG. The scheduler runs `/opt/airflow/app-venv/bin/dbt` with explicit
+`--project-dir /opt/airflow/app/dbt --profiles-dir /opt/airflow/app/dbt`.
+Source precedence and independent `DBT_SCHEMA` outputs are unchanged. Airflow's
+UID-50000 `airflow_dbt_artifacts` volume stores targets/logs beneath
+`/opt/airflow/dbt-artifacts`, separate from standalone tools artifacts. Targets
+represent the latest invocation; export before another build to retain evidence.
+See [orchestration packaging and dependency](ORCHESTRATION.md#dbt-build-after-ingestion-task-83).
+
+Task 8.4 explicitly requires successful ingestion and gives `dbt_build` one
+whole-build retry after a fixed one-minute delay, shared with ingestion. A failed
+first build may leave completed models committed; a retry rebuilds the entire
+project and reruns tests without rerunning ingestion. Exhausted retries fail the
+DAG. Export failed-attempt targets before the automatic retry overwrites them;
+logs append. See [retry and failure policy](ORCHESTRATION.md#dependencies-retries-and-failure-behavior-task-84).

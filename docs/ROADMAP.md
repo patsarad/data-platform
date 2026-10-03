@@ -302,14 +302,69 @@ unverified. See [commands and evidence](engineering/TESTING.md#task-75-clean-vol
 
 Goal: demonstrate scheduled, observable pipeline execution.
 
-- [ ] **8.1 Add Airflow services/configuration to the local Docker environment.**
-- [ ] **8.2 Create a DAG that invokes the existing ingestion command(s).** Do not duplicate ingestion logic inside the DAG.
-- [ ] **8.3 Add a dbt build task after successful ingestion.**
-- [ ] **8.4 Configure dependencies, retries, and failure behavior.**
+- [x] **8.1 Add Airflow services/configuration to the local Docker environment.**
+- [x] **8.2 Create a DAG that invokes the existing ingestion command(s).** Do not duplicate ingestion logic inside the DAG.
+- [x] **8.3 Add a dbt build task after successful ingestion.**
+- [x] **8.4 Configure dependencies, retries, and failure behavior.**
 - [ ] **8.5 Make schedule/start-date/catchup behavior explicit and documented.**
 - [ ] **8.6 Verify an end-to-end DAG run from ingestion through dbt tests.**
 
 **Exit criterion:** Airflow can run the complete data pipeline with visible task-level status and logs.
+
+Task 8.1 verified October 3, 2026: opt-in Airflow 3.3.2/Python 3.11 infrastructure
+uses LocalExecutor, separate persistent PostgreSQL metadata, explicit repeatable
+initialization, local authentication, loopback API/UI and service health checks.
+Credentials/keys and a synthetic metadata marker survive container replacement.
+PostgreSQL-only startup and existing tools commands still work without Airflow
+credentials. New checks: nine initialization tests, eight Compose checks, three
+image checks, 459 host tests / 83 skipped, 15 synthetic ingestion integration tests
+and 533 enabled application tests. No source access, DAG or pipeline execution.
+The unchanged 2 GiB Colima VM passed idle checks; at least 4 GB remains Airflow's
+recommended baseline and future workload capacity is unverified. Evidence exported,
+task resources removed, existing work/data/resources/index preserved, Colima/native
+PostgreSQL stopped/unregistered. **Only 8.1 is newly complete; 8.2–8.6 and this
+phase's exit criterion remain incomplete.** See [validation](engineering/TESTING.md#task-81-local-airflow-infrastructure-verification).
+
+Task 8.2 verified October 3, 2026: one manual `igdb_ingestion` DAG invokes
+`--entity all` with the isolated application interpreter inside LocalExecutor.
+Only the scheduler receives ingestion settings and a separate persistent archive
+volume. Synthetic success/failure runs, actual DAG import, dependency isolation,
+non-root permissions, authentication/health/persistence and standalone tools checks
+pass. New suites: 11 narrow tests, nine Compose checks, two Airflow image checks,
+three tools image checks, 461 default tests / 83 skipped, 15 ingestion integration
+tests and 533 enabled application tests. No live source access. Evidence exported,
+task resources removed, prior work/data/index/resources preserved, services stopped.
+**Only 8.2 is newly complete; 8.3–8.6 and the Phase 8 exit criterion remain incomplete.**
+See [validation](engineering/TESTING.md#task-82-ingestion-dag-verification).
+
+Task 8.3 verified October 3, 2026: the manual DAG now runs `ingest_all` →
+`dbt_build` using the existing project and isolated application executables.
+Only the scheduler receives dbt settings and a separate UID-50000 artifact volume.
+Synthetic LocalExecutor success, upstream ingestion failure, dbt test failure and
+recovery pass; successful builds retain 13 models/46 tests. Three source-schema
+modes, independent outputs, artifact/data persistence, initialization/auth/health
+and tools regressions pass. New checks: 11 narrow, nine Compose, three Airflow
+image, three tools image, 461 host / 83 skipped, 15 ingestion integration and
+533 enabled application tests. No live source access; real workload capacity is
+unverified. Evidence exported, task resources removed, prior work/data/index and
+Docker inventories preserved; Colima/native PostgreSQL stopped/unregistered.
+**Only 8.3 is newly complete; 8.4–8.6 and Phase 8's exit criterion remain incomplete.**
+See [synthetic validation](engineering/TESTING.md#task-83-dbt-task-verification).
+
+Task 8.4 verified October 3, 2026: both existing command tasks explicitly use
+`all_success` and one whole-command retry after a fixed one-minute delay. Actual
+LocalExecutor automatic recovery/exhaustion passed for ingestion and dbt, with
+correct attempt counts, 60-second minimum waits, downstream blocking, final DAG
+states and visible per-attempt logs. Repeated ingestion retained earlier commits,
+idempotent raw keys and per-entity history/checkpoints; successful dbt builds
+retained 13 models/46 tests and expected synthetic values. New results: 11 narrow,
+461 host / 83 skipped, nine Compose, three Airflow image, three tools image,
+15 ingestion integration and 533 enabled application passes. Isolation, auth,
+health, persistence and tools regressions passed. Evidence exported, task resources
+removed, baseline preserved and services stopped/unregistered. No live-source
+validation or real workload capacity claim. **Only 8.4 is newly complete;
+8.5–8.6 and Phase 8's exit criterion remain incomplete.** See
+[synthetic retry validation](engineering/TESTING.md#task-84-dependency-retry-and-failure-verification).
 
 ## Phase 9 — Streamlit consumption layer
 
