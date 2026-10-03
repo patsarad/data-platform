@@ -19,5 +19,32 @@ services:
       start_period: 10s
     stop_grace_period: 30s
 
+  runtime:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB externally}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER externally}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD externally}
+      # Bare keys omit unset variables, preserving the application's fallback.
+      POSTGRES_RAW_SCHEMA:
+      POSTGRES_SCHEMA:
+      DBT_SCHEMA:
+      LOG_LEVEL:
+      igdb_client_id:
+      igdb_client_secret:
+    volumes:
+      - raw_archives:/app/data/raw
+      - dbt_artifacts:/tmp/dbt
+
 volumes:
   postgres_data:
+  raw_archives:
+  dbt_artifacts:

@@ -1,5 +1,187 @@
 # Local Development
 
+## Compose first use and subsequent sessions (task 7.4)
+
+Use this workflow from the repository root in a dedicated **Bash** shell.
+Task 7.5 verified this workflow with new project-owned volumes, two bounded live
+ingestions, a full dbt build and container-replacement persistence. See the
+[commands, results and limits](TESTING.md#task-75-clean-volume-live-workflow-verification).
+Nothing runs the pipeline automatically; the sample does not establish complete
+source coverage or an uncapped incremental bootstrap.
+
+### Select the environment
+
+Prerequisites: Docker CLI, a running Docker engine, Compose with `up --wait` and
+`--wait-timeout`, and registry/package-index access for the first image build.
+Host Python/PostgreSQL are not needed for this container workflow. IGDB/Twitch
+application credentials and internet access are needed only when ingesting.
+On this Mac, use the existing [Colima shell setup](#colima-on-this-mac); it selects
+the dedicated engine/config without changing `~/.docker`, mounts no host
+directories and starts no login service. Elsewhere, select your intended engine
+before continuing. Check `docker version` (client **and server**) and
+`docker compose version`.
+
+Choose a stable, distinct project name for a new environment; reuse that exact
+name for every later session. The example below selects `data-platform-dev`,
+separate from the earlier `data-platform-postgres` project. If resuming an existing
+project, use its name, database/user/password and schema settings instead of these
+new-environment examples. A new project name selects separate volumes; it does
+not copy native data or another project's ingestion history.
+
+```bash
+unset COMPOSE_PROFILES COMPOSE_FILE POSTGRES_SCHEMA
+unset igdb_client_id igdb_client_secret
+export COMPOSE_PROJECT_NAME=data-platform-dev
+export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5433
+export POSTGRES_DB=gaming_analytics POSTGRES_USER=postgres
+export POSTGRES_RAW_SCHEMA=raw DBT_SCHEMA=analytics LOG_LEVEL=INFO
+read -r -s -p 'Docker PostgreSQL password: ' POSTGRES_PASSWORD
+echo
+export POSTGRES_PASSWORD
+dc() { docker compose --env-file /dev/null -p "$COMPOSE_PROJECT_NAME" -f compose.yaml "$@"; }
+dc config --quiet
+```
+
+Enter a nonempty password privately and retain it securely for subsequent sessions.
+`POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` are required even for
+Compose help/parse invocations. Do not source the repository `.env` in this shell:
+`--env-file /dev/null` bypasses it, while exported values feed the explicit
+[runtime allowlist and schema settings](#on-demand-compose-runtime-task-73).
+Use `config --quiet`; plain `config`/`config --environment`, shell tracing and
+unfiltered container inspection can reveal credentials.
+
+Host clients address `127.0.0.1:5433`; use another unused `POSTGRES_PORT` if
+necessary. The runtime always addresses **`postgres:5432`** on the Compose
+network, independent of the host port. Native PostgreSQL's port 5432 and storage
+remain separate; see [coexistence](#coexistence-with-homebrew-postgresql).
+Python and dbt source schemas resolve as `POSTGRES_RAW_SCHEMA` → `POSTGRES_SCHEMA`
+→ `raw`; `DBT_SCHEMA` independently defaults to `analytics`. Unset differs from
+empty: do not export empty schema names. Keep an existing installation's selections
+unless deliberately migrating its tables **and** history; changing a setting
+does not migrate anything. See [schema compatibility](#schema-names-and-existing-analytics-installations).
+
+### Build, start and check readiness
+
+```bash
+# Build once; repeat after source/dbt/requirements/Dockerfile changes.
+# These flags use the existing legacy builder on this Mac without installing buildx.
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc build runtime
+dc up -d --wait --wait-timeout 120 postgres
+dc ps
+# Authenticate from the runtime without ingesting or building models:
+dc run --rm runtime dbt debug --connection
+```
+
+Building downloads image/dependency content and packages the current source; there
+is no repository bind mount, so edits require rebuilding. Credentials and local
+data are excluded from the [image context](#shared-pythondbt-image-task-72).
+Ordinary Compose startup selects only PostgreSQL. `runtime` is behind the `tools`
+profile; explicit `dc run runtime ...` selects it and waits for healthy PostgreSQL
+without needing `--profile tools`. One-off commands exit when finished.
+
+The TCP health check waits past PostgreSQL's temporary initialization server.
+Health alone does not authenticate the supplied password. `dbt debug --connection`
+checks the configured database connection and writes logs, but creates no pipeline
+tables. Use `--connection` in the slim runtime: plain `dbt debug` also checks for
+Git, which is not installed in the image.
+If startup times out, inspect `dc ps` and `dc logs postgres` locally before
+continuing. If authentication fails on an existing volume, check its original
+credentials; do not delete the volume to repair a settings mismatch.
+
+Initialization has three separate owners:
+
+| Owner | When and what it creates |
+|---|---|
+| PostgreSQL image | First startup with an **empty** `postgres_data` volume initializes the cluster and requested database/user. The configured user is a local-development superuser. Existing-volume startup reopens the cluster; changed environment values do not rename databases/users or rotate stored passwords. |
+| Python ingestion | Against an existing database, creates the selected raw schema, `ingestion_runs` and each selected entity's `raw_<entity>` table, archives payloads and upserts rows. It does not create the database/login. |
+| dbt | Reads the five existing raw tables, creates its output schema/models and runs tests. Source declarations and `dbt parse` create no raw tables. |
+
+There are no custom initialization scripts, migrations or automatic raw/dbt
+bootstrap steps in Compose.
+
+### Run commands on demand
+
+Inspect/parse without IGDB or database access (parse writes dbt artifacts):
+
+```bash
+dc run --rm --no-deps runtime python -m src.ingestion.run_ingestion --help
+dc run --rm --no-deps runtime dbt parse --no-partial-parse
+```
+
+`--no-deps` skips PostgreSQL startup; it does not disable the container network.
+For network-disabled direct-image checks and Python tests, see the
+[shared image commands](#shared-pythondbt-image-task-72) and
+[testing guide](TESTING.md#postgresql-integration-tests).
+
+The following is a **live, data-changing** sequence, verified with bounded runs
+in task 7.5 (task 7.4 only documented it). Enter the source
+credentials only when ready to contact Twitch/IGDB and write archives, raw rows
+and run metadata in the selected environment:
+
+```bash
+read -r -s -p 'IGDB client ID: ' igdb_client_id
+echo
+read -r -s -p 'IGDB client secret: ' igdb_client_secret
+echo
+export igdb_client_id igdb_client_secret
+# Bounded first-use sample: at most five records per entity, 25 total.
+# Build only if all entity ingestions succeed.
+dc run --rm runtime python -m src.ingestion.run_ingestion \
+  --entity all --batch-size 5 --max-batches 1 &&
+dc run --rm runtime dbt build
+unset igdb_client_id igdb_client_secret
+```
+
+Ingestion runs games → genres → platforms → companies → involved_companies,
+with separate archives/metadata and idempotent raw upserts. Failure stops later
+entities but retains earlier commits. A capped run never advances watermarks;
+it also cannot establish complete source/reference coverage. Before a deliberate
+uncapped run, read the [ingestion modes](../pipeline/INGESTION.md#explicit-refresh-and-backfill-task-47)
+and [watermark policy](../pipeline/WATERMARKS.md). An uncapped normal run with no
+eligible history bootstraps the endpoint; it is not a required startup step.
+
+`dbt build` makes no IGDB calls, but **creates/replaces analytics relations** and
+runs database tests. It requires all five raw tables in the selected source
+schema; starting PostgreSQL alone or ingesting only games is insufficient for
+the full project. The current build contains eight views, five mart tables and
+46 tests. After later ingestion, rebuild to refresh the marts' stored snapshots;
+see the [dbt build contract](../pipeline/DBT_TRANSFORMATIONS.md#build-contract).
+
+### Preserve, export, shut down and resume
+
+The project retains three named volumes: `postgres_data` (database, raw rows,
+history and dbt models), `raw_archives` (`/app/data/raw`) and `dbt_artifacts`
+(`/tmp/dbt`). The latter two are writable as `app`, UID 10001. All survive
+one-off `--rm`, `dc down` and Colima shutdown. They are separate from host files.
+Use the [artifact export procedure](#compose-archive-and-artifact-persistence)
+before shutdown when you need local copies; it uses `docker cp` without host
+mounts. Those raw/dbt exports are not a database backup.
+
+Wait for active one-off commands to finish, then choose either shutdown form:
+
+```bash
+dc stop postgres  # Keep the stopped container and all volumes.
+# Or remove this project's containers/network while retaining all volumes:
+dc down
+unset POSTGRES_PASSWORD igdb_client_id igdb_client_secret
+# On this Mac, after all intended project containers have stopped:
+colima stop data-platform
+```
+
+Do not use `down --volumes`, volume pruning or `colima delete` for routine
+shutdown. Closing a terminal does not stop PostgreSQL/Colima; there is no automatic
+restart or login service. In the next session, repeat environment/engine selection
+with the **same project name and stored credentials/schema settings**, then:
+
+```bash
+dc up -d --wait --wait-timeout 120 postgres
+dc run --rm runtime dbt debug --connection
+```
+
+Reuse the image unless its inputs changed. Existing database tables, rows,
+watermarks and volumes reopen; no ingestion, restore, migration or dbt rebuild is
+required merely to resume. Run ingestion/build only when you intend to refresh data.
+
 ## Current prerequisites
 
 The current host-based Python/dbt workflow expects:
@@ -85,7 +267,7 @@ with create_connection() as connection:
 PY
 ```
 
-The verified result was `('gaming_analytics', 'postgres')`. The pipeline creates its configured schema and tables. Two bounded genres smoke runs then passed; see [Testing](TESTING.md#task-31-live-smoke-completion). Task 3.2 also passed two bounded platforms runs using this existing cluster, then stopped/unregistered PostgreSQL; see [platforms verification](TESTING.md#task-32-verification). Task 3.3 passed two bounded companies runs against the existing database and left PostgreSQL stopped/unregistered; see [companies verification](TESTING.md#task-33-verification). Task 3.4 passed two bounded involved-companies runs and again left PostgreSQL stopped/unregistered; see [relationship verification](TESTING.md#task-34-verification). Task 3.5 passed two bounded games runs exercising genre/platform/involved-company references and again left PostgreSQL stopped/unregistered; see [games verification](TESTING.md#task-35-verification). Task 3.6 passed two actual all-entity CLI runs and left PostgreSQL stopped/unregistered; see [CLI verification](TESTING.md#task-36-verification). Wait for `pg_isready` to report accepting connections after startup before connecting. These instructions establish the current local service, not the future Docker milestone.
+The verified result was `('gaming_analytics', 'postgres')`. The pipeline creates its configured schema and tables. Two bounded genres smoke runs then passed; see [Testing](TESTING.md#task-31-live-smoke-completion). Task 3.2 also passed two bounded platforms runs using this existing cluster, then stopped/unregistered PostgreSQL; see [platforms verification](TESTING.md#task-32-verification). Task 3.3 passed two bounded companies runs against the existing database and left PostgreSQL stopped/unregistered; see [companies verification](TESTING.md#task-33-verification). Task 3.4 passed two bounded involved-companies runs and again left PostgreSQL stopped/unregistered; see [relationship verification](TESTING.md#task-34-verification). Task 3.5 passed two bounded games runs exercising genre/platform/involved-company references and again left PostgreSQL stopped/unregistered; see [games verification](TESTING.md#task-35-verification). Task 3.6 passed two actual all-entity CLI runs and left PostgreSQL stopped/unregistered; see [CLI verification](TESTING.md#task-36-verification). Wait for `pg_isready` to report accepting connections after startup before connecting. These instructions operate the native cluster; the separate Docker workflow is documented above.
 
 ## Python setup
 
@@ -231,11 +413,12 @@ and [validation record](TESTING.md#task-68-mart-contract-audit-verification).
 
 ## Docker PostgreSQL (task 7.1)
 
-`compose.yaml` defines only PostgreSQL. **Task 7.1 is verified:** Colima resolved
-the initial missing-engine blocker on October 2, 2026. Health, authenticated SQL,
-container-replacement persistence, shutdown and all 533 enabled tests passed.
-Python/dbt can also use the shared image described below (task 7.2).
-Application Compose wiring and the clean-volume pipeline workflow remain tasks 7.3–7.5.
+`compose.yaml` defines PostgreSQL and an on-demand runtime. **Task 7.1 is verified:**
+Colima resolved the initial missing-engine blocker on October 2, 2026. Health,
+authenticated SQL, container-replacement persistence, shutdown and all 533 enabled
+tests passed. For the current procedure, use [first use and subsequent sessions](#compose-first-use-and-subsequent-sessions-task-74);
+task 7.5 also verified bounded clean-volume ingestion and dbt build. This section
+retains the database configuration details.
 
 The image is `postgres:17.11-bookworm`, matching the native PostgreSQL 17.11 major
 and minor version. The official [tag listing](https://github.com/docker-library/official-images/blob/master/library/postgres)
@@ -245,82 +428,15 @@ sets `PGDATA` and the volume mount to `/var/lib/postgresql/data`. The named
 layout; changing major versions requires an explicit upgrade plan. The version
 tag avoids automatic minor upgrades but is not an immutable image digest.
 
-Install/start a Docker engine with current Compose supporting `up --wait` and
-`--wait-timeout`. On this Mac, first use the [Colima shell setup below](#colima-on-this-mac).
-From the repository root, in that dedicated **Bash** shell:
-
-```bash
-docker version
-docker compose version
-export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5433
-export POSTGRES_DB=gaming_analytics POSTGRES_USER=postgres
-read -r -s -p 'Docker PostgreSQL password: ' POSTGRES_PASSWORD
-echo
-export POSTGRES_PASSWORD
-dc() { docker compose --env-file /dev/null -p data-platform-postgres -f compose.yaml "$@"; }
-dc config --quiet
-dc up -d --wait --wait-timeout 120 postgres
-dc ps
-```
-
-Supply a nonempty password privately; do not paste it into commands, logs, or Git.
-`--env-file /dev/null` prevents Compose from implicitly reading the existing `.env`.
-Only the three named initialization variables enter the container. Database, user,
-and password are required with no committed defaults. Exported connection settings
-also override Python's `.env`; dbt reads exports directly. Do not source the native
-`.env` afterward, which would replace those settings. Alternatively, explicitly
-select a private external env file for Compose and export matching client settings.
-Use `config --quiet`: plain `config`, `config --environment`, shell tracing, and
-unfiltered container inspection can expose resolved secrets.
-
-The health check runs TCP `pg_isready` inside the container every 5s, with a 5s
-timeout, 12 retries, and a 10s startup grace period. `$$` defers variable expansion
-to the container. TCP avoids accepting the [entrypoint's temporary socket-only
-initialization server](https://github.com/docker-library/postgres/blob/2603e26e245e558218728ee14e0a42dcb020dc7f/docker-entrypoint.sh).
-Readiness does not prove credentials or database access;
-verify them from the host with the existing Python environment:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python - <<'PY'
-import os
-import psycopg
-with psycopg.connect(host=os.environ['POSTGRES_HOST'], port=os.environ['POSTGRES_PORT'],
-                     dbname=os.environ['POSTGRES_DB'], user=os.environ['POSTGRES_USER'],
-                     password=os.environ['POSTGRES_PASSWORD'], connect_timeout=5) as conn:
-    assert conn.execute('SELECT current_database(), current_user').fetchone() == (
-        os.environ['POSTGRES_DB'], os.environ['POSTGRES_USER'])
-    print('Authenticated connection to the intended database passed')
-PY
-```
-
-The temporary interpreter path is specific to this machine; use your activated
-Python 3.11 environment elsewhere. The image's entrypoint creates the requested
-database and a **superuser** only on first startup with an empty volume. This is
-a local development service; it does not reproduce the native cluster's restricted
-project role. Changing initialization variables later does not rename the database
-or rotate its stored password. No custom initialization scripts, raw tables,
-schemas, ingestion runs, or dbt models are provisioned by Compose.
-
-For normal shutdown and later startup:
-
-```bash
-dc stop postgres
-dc up -d --wait --wait-timeout 120 postgres
-# Remove the container/network while keeping database files:
-dc down
-# Recreate the container against the same named volume:
-dc up -d --wait --wait-timeout 120 postgres
-# End the session:
-dc down
-unset POSTGRES_PASSWORD
-```
+The TCP health check runs `pg_isready` inside the container every 5s, with a 5s
+timeout, 12 retries and a 10s startup grace period. `$$` defers variable expansion
+to the container. TCP avoids accepting the entrypoint's temporary socket-only
+initialization server. The [startup workflow](#build-start-and-check-readiness)
+distinguishes readiness, authenticated access and first-empty-volume initialization.
 
 The image requests PostgreSQL fast shutdown; Compose allows 30s before forced
-termination. There is no automatic restart policy. Both `stop` and `down` retain
-`data-platform-postgres_postgres_data`; reuse the same project name to reopen it.
-Changing `-p` selects another volume and therefore a separate database. Never use
-`down --volumes`, `docker volume prune`, or blanket cleanup on data you need.
-The [disposable validation procedure](TESTING.md#task-71-docker-postgresql-validation)
+termination. There is no automatic restart policy. `stop` and `down` retain the
+project's `postgres_data` volume. The [task 7.1 validation record](TESTING.md#task-71-docker-postgresql-validation)
 checks a committed marker across actual container removal/recreation.
 
 ### Coexistence with Homebrew PostgreSQL
@@ -369,7 +485,7 @@ docker compose version
 
 `docker version` must report both client and server. The explicit socket prevents
 accidental use of another engine; `/var/run/docker.sock` does not need to exist on
-the Mac. Use the PostgreSQL exports and `dc` commands above afterward. Once project
+the Mac. Then use the [environment selection and `dc` commands](#select-the-environment) above. Once project
 containers have been stopped, stop the VM to release its CPU/RAM:
 
 ```bash
@@ -463,5 +579,95 @@ artifacts, or explicitly supply external writable artifact paths/mounts. The Col
 profile here mounts no host directories; ordinary host bind mounts are therefore
 not assumed. Never mount the native PostgreSQL cluster into any container.
 
-Task 7.2 validates synthetic database fixtures only. There is no runtime Compose
-service, bootstrap automation, live ingestion, Airflow or Streamlit in this change.
+Task 7.2 validated synthetic database fixtures only. Task 7.3 adds the Compose
+runtime below; bootstrap automation, live ingestion validation, Airflow and
+Streamlit remain outside this change.
+
+## On-demand Compose runtime (task 7.3)
+
+`runtime` uses the shared Dockerfile and the `tools` profile. Ordinary `dc up`
+starts only PostgreSQL. Explicit `dc run runtime ...` selects the runtime without
+requiring `--profile tools`, waits for the PostgreSQL health dependency, executes
+the supplied command, and exits. Its inherited default is ingestion CLI help.
+No ingestion, migrations, or dbt build runs automatically. The profile is intended
+for one-off commands; there is no long-running application or restart policy.
+
+Use the [first-use/session workflow](#compose-first-use-and-subsequent-sessions-task-74)
+for environment selection, building, readiness and command order. The default runtime
+command is ingestion CLI help. `dc run --rm --no-deps runtime ...` skips the database
+dependency for help/parsing, but still needs the three required Compose database
+settings. It does not disable networking. Direct image commands remain available
+for entirely unconfigured offline checks.
+
+Only the database settings, two source credential names, source/output schema
+settings and `LOG_LEVEL` pass from Compose's environment to the runtime. The
+service has no `env_file` bulk injection, build arguments, credential mount or
+repository mount. Variables exported in the shell override values in an explicitly
+selected Compose env file. With plain `docker compose` and no `--env-file`, Compose
+can load the repository `.env` for interpolation, including the allowlisted bare
+keys. Prefer the explicit file/dedicated shell to avoid selecting native settings
+accidentally. dbt receives these variables directly; Python's packaged `/app`
+contains no `.env` to load. Docker administrators can inspect container credentials.
+Use `dc config --quiet` to validate without printing resolved secrets.
+
+| Setting | Compose runtime behavior |
+|---|---|
+| `POSTGRES_HOST` | Fixed to service name `postgres`, regardless of host setting |
+| `POSTGRES_PORT` | Fixed to container port `5432`; external value only controls PostgreSQL's loopback host publication, default `5433` |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Required externally, shared with the selected PostgreSQL service |
+| `POSTGRES_RAW_SCHEMA`, `POSTGRES_SCHEMA` | Passed only when set; Python/dbt retain explicit → legacy → `raw` precedence |
+| `DBT_SCHEMA` | Passed only when set; independent output default `analytics` |
+| `igdb_client_id`, `igdb_client_secret`, `LOG_LEVEL` | Passed only when set; needed source credentials are checked by existing ingestion code |
+
+Unset and empty schema values differ: empty is explicitly set and is not a fallback.
+Do not export empty schema names. No variable change migrates native tables or
+watermarks. A changed password in the environment does not rotate a password in an
+already initialized PostgreSQL volume; incorrect credentials fail at authentication.
+The TCP readiness check alone does not authenticate the runtime.
+
+### Compose archive and artifact persistence
+
+The runtime stays `app` (UID 10001) in `/app`. Docker initializes these project-scoped
+named volumes from empty image directories owned by that user:
+
+| Volume | Container path | Contents |
+|---|---|---|
+| `raw_archives` | `/app/data/raw` | Existing default timestamped per-entity JSONL output |
+| `dbt_artifacts` | `/tmp/dbt` | Default `target/` and `logs/` for direct dbt commands |
+
+Archives and direct dbt artifacts survive `run --rm`, container replacement,
+`dc down` and Colima shutdown. They are separate from host `data/raw` and existing
+host dbt artifacts. Named volumes work with this Colima profile's lack of host
+mounts. The Dockerfile supplies initial directory ownership; there is no root
+entrypoint or permission/bootstrap service. An externally supplied volume with
+incompatible ownership is not repaired automatically.
+
+Changing the Compose project name selects different volumes. Normal `down` retains
+all three volumes, including `postgres_data`; do not use `down --volumes` for data
+you need. An ingestion `--output-path` outside `/app/data/raw`, overridden dbt paths
+outside `/tmp/dbt`, and pytest's ordinary `/tmp` output are ephemeral unless copied
+before removing the container. Sequential direct dbt commands share/overwrite
+normal target filenames and append logs. Concurrent commands should use distinct
+`--target-path` and `--log-path` subdirectories beneath `/tmp/dbt`.
+
+To export files without any host bind mount, create a stopped container holding
+the volumes, then copy to a new external directory (use an unused container name):
+
+```bash
+export_dir=$(mktemp -d /private/tmp/data-platform-export.XXXXXX)
+dc run --no-deps --name data-platform-export runtime true
+docker cp data-platform-export:/app/data/raw/. "$export_dir/raw"
+docker cp data-platform-export:/tmp/dbt/. "$export_dir/dbt"
+docker rm data-platform-export
+```
+
+The copy preserves volume data; inspect the export before any intentional removal.
+Task 7.3 verified this using synthetic files and offline dbt artifacts only. The
+full enabled suite used an isolated internal network with generated credentials;
+see [exact validation](TESTING.md#task-73-compose-runtime-validation). The
+[first-use workflow](#compose-first-use-and-subsequent-sessions-task-74) documents
+command order; [task 7.5](TESTING.md#task-75-clean-volume-live-workflow-verification)
+verified real bounded archives, raw/history/model persistence and artifact export
+from new volumes. Disposable validation cleanup enabled `--profile tools` before
+`down --volumes` to include the runtime volumes; this is destructive and is not
+the normal session shutdown command.

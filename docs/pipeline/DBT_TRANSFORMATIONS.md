@@ -556,12 +556,30 @@ A reviewer should be able to understand the model without reading every SQL file
 
 ## Build contract
 
+For startup and the intended ingestion → build sequence, follow
+[Compose first use and subsequent sessions](../engineering/LOCAL_DEVELOPMENT.md#compose-first-use-and-subsequent-sessions-task-74).
+PostgreSQL initialization creates the database/login; Python creates all five raw
+tables before a full dbt build. dbt source declarations do not create those tables.
+Task 7.5 verified this sequence on new Compose volumes: two five-record-per-entity
+live runs followed by all thirteen models and 46 passing tests, exact raw-to-model
+reconciliation, and persistence across container recreation. This validates bounded
+startup, not source completeness or an uncapped incremental bootstrap. See the
+[verification record](../engineering/TESTING.md#task-75-clean-volume-live-workflow-verification).
+
 The task-7.2 shared image supports these same dbt commands directly, with project
 and profile directories set to `/app/dbt`. Runtime `POSTGRES_*`/`DBT_SCHEMA`
 variables keep the existing schema resolution; the image carries no credentials.
 Default target/log directories are `/tmp/dbt/target` and `/tmp/dbt/logs`, and
 telemetry is disabled. See [build and direct invocation examples](../engineering/LOCAL_DEVELOPMENT.md#shared-pythondbt-image-task-72).
 This packaging does not change models, invariants, or the optimized test harness.
+Task 7.3 additionally supports `dc run --rm runtime dbt <command>` through the
+profiled Compose service. The environment fixes database addressing to
+`postgres:5432`; unset schema variables remain absent, preserving the same source
+precedence and independent output default. Direct dbt targets/logs persist in the
+project's `dbt_artifacts` volume at `/tmp/dbt`, separate from host artifacts.
+Use separate subdirectories for concurrent commands. See [Compose environment and
+artifact export](../engineering/LOCAL_DEVELOPMENT.md#on-demand-compose-runtime-task-73).
+
 
 The verified validation command is:
 

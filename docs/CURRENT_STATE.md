@@ -1,6 +1,6 @@
 # Current State
 
-Last verified against the working repository on October 2, 2026 (Phase 6 and tasks 7.1–7.2 complete; shared Python/dbt image passes all 533 enabled tests).
+Last verified against the working repository on October 2, 2026 (Phases 6 and 7 complete; task 7.5 clean-volume bounded live workflow and all 533 enabled tests pass).
 
 This document describes what exists in code today. Planned components belong in `ARCHITECTURE.md` and `ROADMAP.md`.
 
@@ -24,7 +24,7 @@ This document describes what exists in code today. Planned components belong in 
 | Generalized ingestion framework | Phase 2 complete (tasks 2.1–2.6) | CLI selects one or all five entities through an explicit ordered callback mapping and reusable lifecycle runner; offline tests cover the composed path with real helpers and fake external boundaries |
 | dbt project | Five staging views, three relationship views, and five mart tables built and queried | `analytics.stg_games`, `analytics.stg_genres`, `analytics.stg_platforms`, `analytics.stg_companies`, and `analytics.stg_involved_companies` exist locally; five existing rows per staging model matched raw records; `analytics.int_game_genres` matched all 11 source-array pairs, including eight unmatched genre references; `analytics.int_game_platforms` matched all 14 platform pairs, including eight unmatched references; `analytics.int_game_companies` matched all five source records, including three with unmatched game/company references; `analytics.mart_game_catalog` matched all five staged games and every scalar/relationship value; `analytics.mart_release_trends` matched UTC yearly counts (1998: 2; 2000/2004/2014: 1 each), totaling five dated games plus zero undated; genre/platform performance marts match every source-derived value for four genre and nine platform rows, with summed game counts 11/14 across five games; company output matches all nine values for five observed company IDs, retaining two unloaded companies and two unloaded game references |
 | dbt sources/tests/docs | Thirteen models and 80 columns documented; ten source, ten staging, eight relationship, four catalog, five release-trend, six performance, and three company-output tests pass against PostgreSQL | Python/dbt share `POSTGRES_RAW_SCHEMA` → legacy `POSTGRES_SCHEMA` → `raw` precedence. Opt-in tests build/query all thirteen models with explicit, legacy, and conflicting schema settings |
-| Docker | PostgreSQL service and shared runtime image verified (7.1–7.2) | Root `compose.yaml` defines PostgreSQL 17.11, TCP health check, loopback port and named volume; `docker/Dockerfile` packages Python 3.11.16/dbt with unchanged requirements and direct non-root commands; context/layer audits, 450 default tests and all 533 enabled tests pass in the image; application Compose wiring remains unimplemented |
+| Docker | Phase 7 complete; bounded clean-volume live workflow verified (7.5) | Profiled `runtime` supports direct Python/dbt commands, explicit `postgres:5432` connectivity, external allowlisted settings and non-root named archive/artifact volumes; ordinary startup runs only PostgreSQL; two bounded all-entity live runs, 13 models/46 dbt tests, container-replacement persistence and all 533 enabled tests pass through isolated Compose |
 | Airflow | Not implemented | `dags/` is a placeholder |
 | Streamlit | Not implemented | `app/` is a placeholder |
 | AI layer | Not implemented / deferred | `src/ai/` is a placeholder |
@@ -115,10 +115,9 @@ The current foundation already demonstrates several useful engineering practices
 
 The highest-value gaps are not UI or AI. They are the pieces that turn the working games proof-of-concept into an actual data platform:
 
-1. containerize PostgreSQL and pipeline dependencies (Phase 7);
-2. orchestrate the pipeline with Airflow;
-3. add a thin analytics application;
-4. add CI and final operational polish.
+1. orchestrate the pipeline with Airflow (Phase 8);
+2. add a thin analytics application;
+3. add CI and final operational polish.
 
 ## Phase 1 verification
 
@@ -672,6 +671,102 @@ Earlier work, `.env`, raw archives, tracked artifacts and the Git index remain
 preserved. **Only 7.2 is newly complete; 7.3 and later remain unchecked.** See
 [image operation](engineering/LOCAL_DEVELOPMENT.md#shared-pythondbt-image-task-72)
 and [exact validation evidence](engineering/TESTING.md#task-72-shared-image-validation).
+
+## Task 7.3 Compose runtime verification
+
+`runtime` reuses the shared image behind the `tools` profile. Ordinary Compose
+startup runs only PostgreSQL; explicit one-off commands wait for its health check.
+The verified PostgreSQL image, TCP check, persistent database volume and default
+loopback binding are unchanged. Runtime addressing is fixed to `postgres:5432`,
+independently of the host-published port. Explicit environment wiring preserves
+`POSTGRES_RAW_SCHEMA` → `POSTGRES_SCHEMA` → `raw` and independent `DBT_SCHEMA`.
+No credentials are baked into images or passed through build arguments.
+
+Named volumes preserve archives at `/app/data/raw` and direct dbt artifacts at
+`/tmp/dbt`, including after `run --rm` and `down`. Initial image directory ownership
+allows UID 10001 to write without a bootstrap/permission entrypoint or host mounts.
+Synthetic persistence and external `docker cp` exports pass after replacement.
+
+Six narrow Compose checks, three image/context checks, an eleven-layer audit,
+version/help commands, `pip check`, four offline schema parses, authenticated
+internal database access, required/incorrect credential rejection and automatic
+health dependency selection pass. Container suites: **450 passed / 83 skipped in
+1.33s**, **1 narrow regression in 6.18s**, **533 enabled in 276.61s**. All existing
+scenarios and the optimized harness are unchanged; each full-project schema mode
+retains thirteen models, 80 columns and all 46 passing dbt tests.
+
+Validation uses synthetic fixtures, explicit task-owned projects, `/dev/null` env
+files, generated passwords and none/internal networking with HTTP rejection
+fixtures. No IGDB calls, live ingestion, migration or native database changes
+occurred. Disposable schemas/resources and the task-built image are removed;
+Colima/native PostgreSQL are stopped/unregistered. Prior work, `.env`, archives,
+tracked artifacts, native cluster, original Docker config and Git index match the
+saved baseline outside the task-only changes. Only **7.3** is newly complete;
+**7.4–7.5 and later remain unchecked**. See [commands and caveats](engineering/LOCAL_DEVELOPMENT.md#on-demand-compose-runtime-task-73)
+and [validation/preservation evidence](engineering/TESTING.md#task-73-compose-runtime-validation).
+
+## Task 7.4 initialization/startup documentation
+
+The [Compose first-use and subsequent-session workflow](engineering/LOCAL_DEVELOPMENT.md#compose-first-use-and-subsequent-sessions-task-74)
+consolidates environment selection, build, readiness/authentication, on-demand
+commands, persistence/export and shutdown/restart. It distinguishes PostgreSQL's
+first-empty-volume database/user initialization, Python-owned raw tables/history
+and dbt-owned transformations, retaining addressing and schema/credential semantics.
+README and dbt navigation point to that workflow. No runtime behavior changed.
+
+Offline checks pass: six Compose configuration checks, actual CLI help, dbt parsing
+(13 models, five sources, 46 tests), 55 focused Python tests and 450 default tests
+with 83 database cases skipped. Documentation links, Bash syntax, whitespace and
+task-only preservation checks pass. Exact commands are in the
+[verification record](engineering/TESTING.md#task-74-startup-documentation-verification).
+Colima/native PostgreSQL remain stopped/unregistered; existing work, credentials,
+archives, tracked artifacts, native data and Docker resources are preserved.
+The live ingestion → dbt sequence is documentation only: **7.4 is complete;
+7.5 and later remain unchecked**. No clean-volume pipeline or new integration
+validation was run in this task.
+
+## Task 7.5 clean-volume live workflow verification
+
+The documented Compose workflow passed on October 2, 2026 using project
+`data-platform-task75-20261002-a7c9`, unused loopback port `55475`, explicit
+`task75_validation` database/user, a generated private password and three new
+project-owned volumes. The current runtime was built using existing tooling.
+PostgreSQL initialization, TCP readiness and authenticated `postgres:5432` access
+passed; no application relations existed before ingestion. A documentation fix
+uses `dbt debug --connection`: plain `dbt debug` authenticates but fails its Git
+check because the slim image has no Git. No runtime/code/dependency fix was needed.
+
+Two actual `--entity all --batch-size 5 --max-batches 1` CLI runs each loaded five
+records per entity. Each raw table retains five distinct IDs, both archives and
+successful 5/5 run records; all ten watermark starts/ends are NULL. The second
+run refreshed all 25 fetch timestamps and retained earlier history. Source IDs
+and payloads happened to be unchanged; validation compared the archive union and
+latest payload per ID rather than assuming source stability.
+
+The complete live-data build passed **13 models and 46 tests**. All staging
+values, relationships and five marts reconciled to raw data. Model row counts:
+five per staging view; genre/platform/company relationships 11/14/5; catalog 5,
+release trends 4, genre/platform performance 4/9, company output 5. Annual counts
+are 1998: 2 and 2000/2004/2014: 1 each, with zero undated games. Unloaded
+references remain represented according to the existing contracts.
+
+Database rows/history/models and archive/dbt hashes matched exactly after
+`down` and recreation with the same volumes. A database SQL dump, ten JSONL
+archives, dbt artifacts, snapshots, command logs and test artifacts were exported
+outside the repository before scoped cleanup. New test evidence: five applicable
+Compose checks, three image checks, 55 narrow offline tests, 450 default tests
+with 83 skipped, 15 ingestion integration tests, and **533 enabled tests in 273.11s**.
+Each of the three synthetic schema-mode builds also passed all 46 dbt tests.
+
+Only task-specific documentation changed. All task containers/network/volumes and
+the task image were removed; prior Docker inventory matches. Colima/native
+PostgreSQL are stopped/unregistered, and prior work, `.env`, archives, generated
+tracked files, native data, Docker configuration and Git index are preserved.
+Only **7.5** is newly checked; **Phase 7 is complete** because its documented
+clean-environment core-pipeline exit criterion is satisfied. Phase 8 and later
+remain unchecked. This is bounded startup validation, not full source coverage,
+a clean-clone/new-machine test, or an uncapped incremental bootstrap. See
+[exact commands, evidence and limits](engineering/TESTING.md#task-75-clean-volume-live-workflow-verification).
 
 ## Known repository hygiene items
 

@@ -17,8 +17,8 @@ RUN python -m pip install --no-cache-dir -r requirements.txt \
     && python -m pip check
 
 RUN useradd --create-home --uid 10001 app \
-    && mkdir -p /app/data/raw \
-    && chown app:app /app/data/raw
+    && mkdir -p /app/data/raw /tmp/dbt \
+    && chown app:app /app/data/raw /tmp/dbt
 
 COPY src/ ./src/
 COPY dbt/ ./dbt/

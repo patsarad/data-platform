@@ -2,7 +2,7 @@
 
 A production-style data engineering project that ingests video-game metadata from IGDB, stores source records in PostgreSQL, transforms them with dbt, orchestrates the pipeline with Airflow, and exposes curated analytics through Streamlit.
 
-> **Project status:** active development. Games ingestion and raw PostgreSQL loading are implemented. Genres, platforms, companies, and involved-companies ingestion are implemented and verified with offline tests and two bounded live smoke runs per entity. Games genre/platform/involved-company references and a single CLI for one or all five entities are implemented. Two bounded all-entity CLI runs passed. The dbt staging views `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` are built and queried against PostgreSQL, with opt-in database integration tests; Docker, Airflow, and Streamlit remain future work.
+> **Project status:** active development. Five-entity ingestion, incremental raw loading, and thirteen dbt models with 46 database tests are implemented. Phase 7 is complete: the documented Compose workflow passed two bounded live ingestions and a full dbt build from new volumes, with persistence across container replacement. Airflow and Streamlit remain future work.
 
 ## Architecture
 
@@ -41,7 +41,8 @@ Docker Compose provides the local runtime.
 - normal CLI incremental selection for games, companies, and involved companies: unfiltered bootstrap, then frozen 24-hour overlap windows; eligible uncapped default-field successes commit the cutoff after raw loading ([watermark policy](docs/pipeline/WATERMARKS.md)); genres/platforms remain unfiltered on normal runs
 - explicit `--full-refresh` and `--backfill-start A --backfill-end B` modes for one or all entities; backfills use whole-second UTC bounds and never advance normal progress
 - unit tests for the implemented Python components
-- dbt project scaffolding
+- dbt staging, relationship views and five curated mart tables
+- Docker Compose PostgreSQL with persistent storage and an on-demand non-root Python/dbt runtime
 - dbt `igdb` source declarations for the five raw tables, with ten source-key tests verified against PostgreSQL
 - `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies` as dbt staging views, built and queried against PostgreSQL
 - opt-in PostgreSQL/dbt integration checks for transactions, checkpoints, schema compatibility, and staging values
@@ -60,52 +61,30 @@ See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) for the exact implementation 
 
 ## Quick start — current development state
 
-Use Python **3.11** (the verified development baseline). Run these commands from the repository root on macOS/Linux; do not assume the system `python3` is 3.11:
+Start with [Compose first use and subsequent sessions](docs/engineering/LOCAL_DEVELOPMENT.md#compose-first-use-and-subsequent-sessions-task-74).
+It covers prerequisites, isolated environment selection, image build, PostgreSQL
+readiness, explicit ingestion → dbt commands, persistent volumes, artifact export,
+shutdown and restart. Ordinary startup runs only PostgreSQL. The live ingestion
+sequence contacts IGDB and modifies data. Task 7.5 verified bounded clean-volume
+startup, repeat upserts, all 13 models/46 tests and persistence; see the
+[validation record](docs/engineering/TESTING.md#task-75-clean-volume-live-workflow-verification).
+This sample does not establish full source coverage or an uncapped bootstrap.
 
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python --version
-python -m pip install -r requirements.txt
-python -m pip check
-```
-
-Run the unit tests; these need neither `.env`, IGDB credentials, nor PostgreSQL:
-
-```bash
-python -m pytest -q
-```
-
-For live ingestion, copy `.env.example` to `.env` if it does not already exist. Set `igdb_client_id`, `igdb_client_secret`, and the `POSTGRES_*` values for an existing database. `POSTGRES_RAW_SCHEMA` selects Python's raw tables and `ingestion_runs` (default `raw`); `DBT_SCHEMA` selects dbt output (default `analytics`). Python loads `.env` automatically; exported environment variables take precedence. dbt requires exported variables. Never commit `.env`. Existing installations should read the [schema transition instructions](docs/engineering/LOCAL_DEVELOPMENT.md#schema-names-and-existing-analytics-installations) before changing their raw setting.
-
-Inspect CLI options without external services, then run a limited smoke test with valid credentials and PostgreSQL available:
+For host development, follow [Python 3.11 setup](docs/engineering/LOCAL_DEVELOPMENT.md#python-setup)
+and [native PostgreSQL operation](docs/engineering/LOCAL_DEVELOPMENT.md#local-postgresql-on-apple-silicon).
+Preserve any existing `.env`; [schema compatibility](docs/engineering/LOCAL_DEVELOPMENT.md#schema-names-and-existing-analytics-installations)
+explains how to retain existing raw tables and watermark history. Host and Docker
+storage are separate. With the host environment activated, these checks need no
+external services:
 
 ```bash
 python -m src.ingestion.run_ingestion --help
-python -m src.ingestion.run_ingestion --max-batches 1
-python -m src.ingestion.run_ingestion --entity genres --batch-size 5 --max-batches 1
-python -m src.ingestion.run_ingestion --entity all --batch-size 5 --max-batches 1
-python -m src.ingestion.run_ingestion --entity companies --full-refresh --max-batches 1
-python -m src.ingestion.run_ingestion --entity companies --backfill-start 2026-09-01T00:00:00Z --backfill-end 2026-09-02T00:00:00Z --max-batches 1
+python -m pytest -q -p no:cacheprovider
 ```
 
-The default games smoke run requests at most 500 games, writes `data/raw/raw_games_<timestamp>.jsonl`, and upserts `<POSTGRES_RAW_SCHEMA>.raw_games` (default: `raw.raw_games`). It records its lifecycle in `<POSTGRES_RAW_SCHEMA>.ingestion_runs`, committing a start record before fetching. The database must exist; the configured user needs schema/table creation and write privileges, including for the metadata table. See [raw storage](docs/pipeline/RAW_STORAGE.md) for transaction and failure semantics.
-
-`all` runs games → genres → platforms → companies → involved_companies once each, sequentially. Fetch limits apply separately to each entity; the bounded command above requests at most 25 records total. Each gets its own `raw_<entity>_<timestamp>.jsonl`, raw-load context, and metadata lifecycle. Failure stops the command before later entities start; earlier successful loads remain committed. `--output-path` is supported for one entity and rejected with `all` because one filename is ambiguous.
-
-The bounded smoke commands above never publish a checkpoint, even if the source returns fewer records than the cap. An uncapped CLI run looks up each incremental entity's last successful cutoff, reads the full endpoint if none exists, or applies the overlap window from offset zero. It records the actual lower bound at start and publishes the fixed exclusive cutoff only when the default-field extraction, timestamp/count checks, archive, raw context, and terminal metadata commit succeed. A successful run can load rows with a NULL end and a safe warning. Reference entities always have NULL bounds. This path has offline and real-PostgreSQL integration coverage; controlled source responses test checkpoint publication. Bounded live IGDB normal/refresh runs and backfill filters have also passed. Uncapped live bootstrap remains unverified.
-
-Full refresh reads selected endpoints unfiltered and upserts without deleting existing raw rows. An uncapped eligible refresh may publish a newer cutoff for incremental entities. Backfill accepts an explicit inclusive/exclusive UTC interval, filters each page, records its lower bound, and always leaves its end NULL; the next normal run uses the prior eligible cutoff or bootstraps. Both modes work with `--entity all`. See [CLI details](docs/pipeline/INGESTION.md#explicit-refresh-and-backfill-task-47). Their database effects have repeatable integration coverage, and bounded live source runs passed during reassessment.
-
-Phase 3 is complete. See [CLI behavior](docs/pipeline/INGESTION.md#cli-entity-selection-task-36), [validation](docs/engineering/TESTING.md#task-36-verification), and [on-demand PostgreSQL commands](docs/engineering/LOCAL_DEVELOPMENT.md#local-postgresql-on-apple-silicon).
-
-Validate the current dbt scaffold without a database connection:
-
-```bash
-dbt parse --project-dir dbt --profiles-dir dbt
-```
-
-Warnings about unused intermediate/marts configuration are expected until those models exist. `dbt ls --project-dir dbt --profiles-dir dbt --resource-type source` lists the five `igdb` sources, and `--resource-type model` lists `stg_games`, `stg_genres`, `stg_platforms`, `stg_companies`, and `stg_involved_companies`, without a database connection. To check PostgreSQL connectivity, export the database settings first, then run `dbt debug --project-dir dbt --profiles-dir dbt`. dbt does not automatically load `.env`; see [local development](docs/engineering/LOCAL_DEVELOPMENT.md) for the full procedure. `dbt build` now passes with the existing local configuration, creating `analytics.stg_games`, `analytics.stg_genres`, `analytics.stg_platforms`, `analytics.stg_companies`, and `analytics.stg_involved_companies` and passing all ten source tests. Python and dbt both accept legacy `POSTGRES_SCHEMA` when `POSTGRES_RAW_SCHEMA` is absent. View creation alone does not evaluate row casts. Run `RUN_POSTGRES_INTEGRATION=1 python -m pytest -q tests/integration` for database-backed row and lifecycle checks; the default test command stays offline. See [integration setup](docs/engineering/TESTING.md#postgresql-integration-tests).
+See [ingestion CLI behavior](docs/pipeline/INGESTION.md#cli-entity-selection-task-36),
+[dbt build requirements](docs/pipeline/DBT_TRANSFORMATIONS.md#build-contract) and
+[testing](docs/engineering/TESTING.md#postgresql-integration-tests) for details.
 
 ## Documentation
 

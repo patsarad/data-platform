@@ -46,8 +46,20 @@ unchanged dependency requirements, source, dbt definitions and test suite under
 ingestion CLI help. Credentials remain external, and dbt artifacts default to
 `/tmp`. The build context excludes local/private data and generated files.
 Python still owns ingestion/raw loading and dbt owns transformations. Compose
-continues to define PostgreSQL only; runtime service wiring and clean-volume
-pipeline validation remain later tasks. See [image commands](engineering/LOCAL_DEVELOPMENT.md#shared-pythondbt-image-task-72).
+now also provides the on-demand runtime described below; task 7.5 verifies bounded
+clean-volume ingestion, dbt build and persistence without changing these boundaries.
+See [image commands](engineering/LOCAL_DEVELOPMENT.md#shared-pythondbt-image-task-72).
+
+Task 7.3 adds a `runtime` service behind the `tools` profile. Ordinary Compose
+startup selects only PostgreSQL; explicit one-off commands reuse the image and
+wait for the database health dependency. Runtime connections are fixed to
+`postgres:5432`, independently of the loopback host-published port. An explicit
+environment allowlist preserves unset source-schema fallback and independent dbt
+outputs. Credentials enter only at runtime. Project-scoped named volumes preserve
+raw archives at `/app/data/raw` and dbt artifacts at `/tmp/dbt`, with initial
+ownership supplied by the non-root image. No host directory mounts, permission
+entrypoint, initialization automation or automatic pipeline commands are added.
+See [Compose commands and persistence](engineering/LOCAL_DEVELOPMENT.md#on-demand-compose-runtime-task-73).
 
 ## Layer responsibilities
 

@@ -225,9 +225,9 @@ Goal: make the platform reproducible on a new machine.
 
 - [x] **7.1 Add PostgreSQL service with health check and persistent volume.**
 - [x] **7.2 Containerize the Python/dbt runtime or create a shared project image.**
-- [ ] **7.3 Add Compose configuration and environment wiring without baking secrets into images.**
-- [ ] **7.4 Add initialization/startup documentation.**
-- [ ] **7.5 Verify a clean-volume setup can ingest data and run `dbt build`.**
+- [x] **7.3 Add Compose configuration and environment wiring without baking secrets into images.**
+- [x] **7.4 Add initialization/startup documentation.**
+- [x] **7.5 Verify a clean-volume setup can ingest data and run `dbt build`.**
 
 **Exit criterion:** the documented Docker workflow can create the database and run the core pipeline from a clean environment.
 
@@ -255,6 +255,48 @@ no IGDB access or real-data pipeline run occurred. Resources were cleaned and
 Colima/native PostgreSQL are stopped/unregistered; existing work/data are preserved.
 **Only 7.2 is newly complete; 7.3–7.5 and later remain unchecked.** See
 [image validation](engineering/TESTING.md#task-72-shared-image-validation).
+
+Task 7.3 verified October 2, 2026: profiled `runtime` reuses the shared image for
+on-demand Python/dbt commands, with a health dependency, fixed `postgres:5432`,
+an external environment allowlist and unchanged source/output schema semantics.
+Ordinary startup runs only PostgreSQL. Named archives/dbt artifacts survive
+container replacement and `down`, writable as UID 10001 without host mounts.
+Six configuration and three image checks pass, as do versions/help, four offline
+schema parses, authentication failures, dependency startup and synthetic storage
+export. Default/narrow/enabled suites: 450 passed / 83 skipped; 1 passed;
+533 passed in 276.61s. All existing scenarios and three complete schema modes
+remain. No IGDB access, live pipeline, bootstrap or native data changes occurred.
+Disposable resources are cleaned; Colima/native PostgreSQL are stopped/unregistered
+and prior work/data are preserved. **Only 7.3 is newly complete; 7.4–7.5 and later
+remain unchecked.** See [Compose validation](engineering/TESTING.md#task-73-compose-runtime-validation).
+
+Task 7.4 verified October 2, 2026: consolidated first-use and subsequent-session
+instructions in Local Development, with README/dbt navigation and explicit
+initialization ownership, isolated settings, addressing, persistence/export and
+restart behavior. CLI help, six offline Compose checks, dbt parsing (13 models,
+five sources, 46 tests), 55 narrow tests and 450 default tests with 83 skipped pass;
+links, shell syntax, whitespace and preservation checks pass. No service startup,
+image build, IGDB access, ingestion or database changes occurred. Existing work,
+data and resources are retained; Colima/native PostgreSQL remain stopped/unregistered.
+**Only 7.4 is newly complete; the documented clean-volume live sequence remains
+task 7.5, which is unchecked.** See [commands and validation limits](engineering/TESTING.md#task-74-startup-documentation-verification).
+
+Task 7.5 verified October 2, 2026: the current image built and new isolated volumes
+initialized PostgreSQL, with authenticated runtime access and no application
+relations before ingestion. Two bounded all-entity live CLI runs retained five
+raw rows per entity, ten archives and ten successful runs with NULL watermark
+ends. All thirteen models and 46 dbt tests passed and reconciled to raw data;
+rows/history/models and artifacts survived container removal/recreation. Evidence
+was exported before task-only cleanup. New checks: five applicable Compose checks,
+three image checks, 55 narrow offline, 450 default / 83 skipped, 15 ingestion
+integration and 533 enabled tests (273.11s); three synthetic schema modes each
+retain all 46 dbt tests. The startup docs now use `dbt debug --connection` to avoid
+the slim image's unrelated missing-Git check. Prior work/resources are preserved;
+Colima/native PostgreSQL are stopped/unregistered. **Only 7.5 is newly complete;
+Phase 7 is complete: its documented clean-environment core-pipeline exit criterion
+is satisfied. Phase 8 and later remain unchecked.** The validation is bounded;
+full source coverage, uncapped bootstrap and task 10.7's clean-clone run remain
+unverified. See [commands and evidence](engineering/TESTING.md#task-75-clean-volume-live-workflow-verification).
 
 ## Phase 8 — Airflow orchestration
 

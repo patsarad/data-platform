@@ -3481,3 +3481,501 @@ changed; `.env`, archives, tracked artifacts, production/test code and earlier
 uncommitted work are preserved. The three new task files account for all additions.
 All dbt artifacts remain outside the repository. Tasks **7.3–7.5 remain unchecked**;
 no runtime Compose service, bootstrap, live ingestion, Airflow or Streamlit was added.
+
+## Task 7.3 Compose runtime validation
+
+Verified October 2, 2026. Task-only changes: `compose.yaml`,
+`docker/Dockerfile` (initial ownership of `/tmp/dbt`), `.env.example`, new
+`docker/validate_compose.py`, and six documentation pages (`CURRENT_STATE.md`,
+`ARCHITECTURE.md`, `ROADMAP.md`, `LOCAL_DEVELOPMENT.md`, this page and
+`pipeline/DBT_TRANSFORMATIONS.md`). No production Python, dependency, model,
+existing test or optimized-harness changes were needed.
+
+The private evidence directory is `/private/tmp/data-platform-task73-37of6xpo`.
+It contains before-task copies of 206 repository files, the original Git diff/status,
+and 1,330 external file hashes (native PostgreSQL cluster, original `~/.docker`,
+and Git index). `task-only.diff` compares against that working tree, including
+previously uncommitted content. No `.env` was edited or loaded into validation.
+The previously reported tracked generated/raw files remain untouched.
+
+Narrow configuration checks run without an engine, with a sanitized subprocess
+environment, an explicit `/dev/null` env file, and synthetic settings only:
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+export DOCKER_CONFIG="$HOME/.config/data-platform/docker"
+export DOCKER_HOST="unix://$HOME/.colima/data-platform/docker.sock"
+unset DOCKER_CONTEXT
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_compose.py
+```
+
+All **6 checks pass**: default/profile service selection, missing/empty required
+settings, loopback host-port overrides versus fixed `postgres:5432`, environment
+allowlist and unset values, env-file/shell schema precedence (including empty versus
+absent), and PostgreSQL/named-storage contracts. Resolved environments are captured
+in memory rather than printed. The first run corrected a test expectation because
+Compose represents an inherited command/entrypoint as JSON null.
+
+After starting the existing Colima profile without login registration, actual
+validation used these commands:
+
+```bash
+colima start data-platform --activate=false
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task73-37of6xpo/validate_runtime.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task73-37of6xpo/audit_image.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task73-37of6xpo/validate_dependency.py
+```
+
+The runtime driver selects project `data-platform-task73-37of6xpo`, database/user
+`task73_validation`, host port `55473`, and a generated in-memory password. Every
+Compose call supplies `--env-file /dev/null`, absolute `-f` files and explicit `-p`.
+Only the task override marks the default network `internal: true`; normal Compose
+retains networking needed for future deliberate ingestion. A second override
+sets runtime `networks: !reset []` and `network_mode: none` for offline checks.
+No host paths, repository data, native cluster or existing database are mounted.
+The regular project-scoped PostgreSQL volume is disposable in this task project.
+
+For the following command transcript, `dc73` and `offline73` abbreviate these
+exact argument prefixes; connection values above are supplied by the driver:
+
+```bash
+dc73() { docker compose --env-file /dev/null -p data-platform-task73-37of6xpo \
+  -f /Users/patrick/Desktop/Code/data_platform/compose.yaml \
+  -f /private/tmp/data-platform-task73-37of6xpo/internal.yaml "$@"; }
+offline73() { docker compose --env-file /dev/null -p data-platform-task73-37of6xpo \
+  -f /Users/patrick/Desktop/Code/data_platform/compose.yaml \
+  -f /private/tmp/data-platform-task73-37of6xpo/internal.yaml \
+  -f /private/tmp/data-platform-task73-37of6xpo/offline.yaml "$@"; }
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc73 build runtime
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python docker/validate_image.py data-platform-task73-37of6xpo-runtime:latest
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-python-version --rm runtime python --version
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-dbt-version --rm runtime dbt --version
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-pip-check --rm runtime python -m pip check
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-default-help --rm runtime
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-cli-help --rm runtime python -m src.ingestion.run_ingestion --help
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-dbt-help --rm runtime dbt --help
+offline73 run --no-deps -T --name data-platform-task73-37of6xpo-default-suite \
+  -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=25 --basetemp=/tmp/default
+dc73 up -d --wait --wait-timeout 120
+dc73 run --no-deps -T --name data-platform-task73-37of6xpo-narrow-suite --rm \
+  -e RUN_POSTGRES_INTEGRATION -e POSTGRES_RAW_SCHEMA -e DBT_SCHEMA -e PGCONNECT_TIMEOUT \
+  runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 \
+  --basetemp=/tmp/narrow tests/integration/test_dbt_postgres.py::test_release_trends_values_utc_grain_and_reconciliation
+dc73 run --no-deps -T --name data-platform-task73-37of6xpo-enabled-suite \
+  -e RUN_POSTGRES_INTEGRATION -e POSTGRES_RAW_SCHEMA -e DBT_SCHEMA -e PGCONNECT_TIMEOUT \
+  runtime python -m pytest -q -p no:cacheprovider --strict-markers --durations=25 \
+  --basetemp=/tmp/enabled
+```
+
+The driver sets `RUN_POSTGRES_INTEGRATION=0` for default and `1` for narrow/enabled;
+these last two also receive explicit `POSTGRES_RAW_SCHEMA=raw`,
+`DBT_SCHEMA=analytics`, and `PGCONNECT_TIMEOUT=5`. Python bytecode is disabled by
+the image. `commands.json` records all exact argument arrays/return codes without
+credential values, including assertions supplied through Python stdin.
+
+The actual Compose build succeeds through the existing legacy builder; no buildx
+installation, tooling upgrade or dependency change was needed. Image ID:
+`sha256:d3ce29218a40` (short prefix). Python **3.11.16**, dbt Core **1.12.5**,
+dbt-postgres **1.11.0**, Psycopg **3.3.6**, and `pip check` pass. Version/help
+commands run without networking; dbt's version check cannot query the package
+index, as expected. All three existing context/image checks pass. The additional
+layer audit checks **11 layers / 14,633 files / 94 project files**, confirms exact
+allowlisted project contents, and finds no credential environment settings in the
+image. No credentials are supplied as build arguments or copied into image layers.
+
+Four independent offline runtime checks call `dbtRunner().invoke(['parse',
+'--no-partial-parse'])` and inspect the manifest: default `raw`, explicit,
+legacy-only, and conflicting explicit/legacy source schemas. Python `Settings`
+and all five dbt sources agree, while `DBT_SCHEMA` remains independent. All thirteen
+models and 80 documented columns remain present. Runtime commands run as UID 10001
+in `/app`, without `/app/.env`; missing source credentials fail locally through the
+existing auth helper, without invoking ingestion or HTTP.
+
+Ordinary `up` starts exactly `postgres`. Runtime SQL authenticates the intended
+database/user on server port 5432. Wrong and empty runtime passwords are rejected.
+Missing Compose credentials are rejected before container creation by the narrow
+checks; the first driver attempt incorrectly expected an empty Compose password
+to reach runtime, then was corrected to test an empty password inside the probe.
+That attempt cleaned its project, and its evidence is retained in `first-attempt/`.
+The separate `-dependency` project uses host port 55474 and the same built image
+with generated credentials: explicit `run --rm runtime python -c ...` starts the
+healthy PostgreSQL dependency, authenticates and exits, leaving only PostgreSQL
+running until scoped cleanup.
+
+Final results: **450 passed / 83 skipped in 1.33s** by default; **1 passed in
+6.18s** for the narrow PostgreSQL regression; **533 passed in 276.61s** with
+integration enabled. All 65 dbt behavior scenarios, three full-project schema
+checks and 15 ingestion cases remain unchanged. Each full-project mode retains
+thirteen models, 80 documented columns and **46 passing dbt tests**.
+
+No validation contacted IGDB: offline commands/default tests used `network_mode:
+none`; database tests used only the internal Docker network with unchanged HTTP
+rejection fixtures and disabled dbt telemetry. A TCP attempt to the documentation
+address `192.0.2.1:443` failed from that network; no source endpoint was probed.
+This exercises synthetic fixtures, not task 7.5's live clean-volume pipeline.
+
+The driver writes synthetic markers into both runtime volumes as UID 10001,
+removes containers/network with `down`, then creates a fresh runtime that reads
+and rewrites both markers. Offline dbt manifest/log files also survive. `docker cp`
+exports both volumes to the external evidence directory; copied marker content is
+verified. No actual archives are loaded. Pytest directories are copied from stopped
+containers before removal; all generated dbt artifacts remain outside the repository.
+
+Authenticated SQL confirms no `test_dp_%` schemas remain after the enabled suite.
+Only the two task-owned projects' containers/networks/volumes are removed, plus
+the uniquely named context probes and the task-built runtime image. The earlier
+`data-platform-runtime:task72` image is retained. There is no blanket cleanup.
+Compose warnings about orphaned stopped test containers refer to the task's
+retained artifact containers; each is explicitly removed after export. Final
+inventory has no containers/volumes and only the original built-in networks.
+
+Final commands:
+
+```bash
+docker image rm data-platform-task73-37of6xpo-runtime:latest
+colima stop data-platform
+colima list
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/bin/brew services info colima
+/opt/homebrew/opt/postgresql@17/bin/pg_isready -h 127.0.0.1 -p 5432
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task73-37of6xpo/check_completion.py
+git diff --check
+```
+
+Colima is stopped; native PostgreSQL and both Homebrew services remain
+stopped/unregistered. The native readiness check returns exit 2/no response.
+All 1,330 external hashes match. Of 206 baseline repository files, 197 are unchanged;
+only the nine intended files changed, and `docker/validate_compose.py` is the only
+addition. `.env`, archives, tracked artifacts, private files, requirements,
+production/test code, native data and previous work are preserved; the Git index
+is unchanged and nothing was committed. Only **7.3** is newly checked; **7.4–7.5
+and later remain unchecked**.
+
+Remaining limits: Compose needs explicit database settings even for offline help;
+Docker administrators can inspect runtime environment credentials; existing volumes
+with incompatible ownership are not repaired automatically; concurrent direct dbt
+commands need separate artifact paths. Dependency ranges remain unlocked. No
+bootstrap automation, live ingestion, migration or clean-volume pipeline exercise
+was added.
+
+## Task 7.4 startup documentation verification
+
+Verified October 2, 2026. Documentation only: `README.md`, `CURRENT_STATE.md`,
+`ROADMAP.md`, `engineering/LOCAL_DEVELOPMENT.md`, this page and
+`pipeline/DBT_TRANSFORMATIONS.md`. The canonical
+[first-use/session workflow](LOCAL_DEVELOPMENT.md#compose-first-use-and-subsequent-sessions-task-74)
+reuses the existing image, schema, storage/export and Colima references. Redundant
+operation command blocks and stale README startup claims were consolidated; prior
+validation history remains intact. No production/configuration/test files changed.
+
+Evidence is saved outside the repository in
+`/private/tmp/data-platform-task74.6w6JB2`: working-tree copies, initial status/diff,
+repository/external fingerprints, help logs, `commands.json`, dbt/pytest output,
+review helpers and `task-only.diff`. The diff compares against the initial working
+tree, preserving the existing uncommitted 7.1–7.3 work.
+
+Executed configuration check (no running engine needed):
+
+```bash
+env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+  DOCKER_CONFIG="$HOME/.config/data-platform/docker" PYTHONDONTWRITEBYTECODE=1 \
+  /private/tmp/data-platform-phase1-venv/bin/python docker/validate_compose.py
+```
+
+**6 checks passed.** The existing checker supplies synthetic settings and
+`--env-file /dev/null`; its env-file precedence case uses only a temporary synthetic
+file. Resolved configurations are captured privately and never printed.
+
+Executed the temporary validation driver:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task74.6w6JB2/verify_commands.py
+```
+
+It uses an explicit subprocess environment: no inherited project/source credentials,
+`PYTHONDONTWRITEBYTECODE=1`, `PYTHON_DOTENV_DISABLED=1`, disabled dbt telemetry,
+`RUN_POSTGRES_INTEGRATION=0`, synthetic database/user/password `task74_synthetic`,
+host `127.0.0.1`, port `55474`, raw schema `raw` and output schema `analytics`.
+The installed dotenv implementation was checked to honor the disable flag.
+Repository credentials were not loaded. Every Compose invocation uses this prefix:
+
+```bash
+docker compose --env-file /dev/null -p data-platform-task74-check \
+  -f /Users/patrick/Desktop/Code/data_platform/compose.yaml
+```
+
+The exact argument arrays and return codes are in `commands.json`. All exited 0:
+
+- Ingestion `--help` through the required host interpreter; confirmed entity and
+  bounded batch options against the implemented CLI.
+- Compose `build/up/run/config/ps/logs/stop/down --help`; confirmed `--wait`,
+  `--wait-timeout`, `--rm`, `--no-deps`, `--name` and `--quiet`.
+- Docker `cp/rm/version --help`, Colima `start/stop --help` (including `--activate`),
+  and host dbt `parse/debug/build --help`.
+- Compose `config --quiet` and `config --services`; ordinary service selection
+  returns exactly `postgres`.
+
+The driver executed these dbt/test commands with that sanitized environment:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/dbt parse --no-partial-parse \
+  --project-dir /private/tmp/data-platform-task74.6w6JB2/dbt-project \
+  --profiles-dir /private/tmp/data-platform-task74.6w6JB2/dbt-project
+/private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/test_config.py tests/test_run_ingestion.py tests/test_dbt_sources.py \
+  --basetemp=/private/tmp/data-platform-task74.6w6JB2/pytest-narrow
+/private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider \
+  --basetemp=/private/tmp/data-platform-task74.6w6JB2/pytest-default
+```
+
+Parsing used an external copy of the dbt definitions, with `DBT_TARGET_PATH` and
+`DBT_LOG_PATH` set to `dbt-target`/`dbt-logs` in the evidence directory. It discovered
+**13 models, five raw sources and 46 tests**, with independent output schema
+`analytics`. No database connection was made and no dbt tests were executed.
+Focused Python tests: **55 passed in 0.38s**; full default suite: **450 passed,
+83 skipped in 1.77s**. The 533 enabled cases and three full-project schema-mode
+builds remain task 7.3 evidence; they were not rerun for this documentation task.
+
+Documentation/preservation checks and service inspection:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task74.6w6JB2/review_docs.py
+git diff --check
+env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+  DOCKER_CONFIG="$HOME/.config/data-platform/docker" /opt/homebrew/bin/colima list
+/opt/homebrew/bin/brew services info postgresql@17
+/opt/homebrew/bin/brew services info colima
+```
+
+The review checks relative links/anchors, `bash -n` for README/Local Development
+Bash blocks, whitespace, the single 7.4 checkbox transition, and file fingerprints.
+Only the six intended documentation files differ; all other repository files and
+1,331 external/index fingerprints match (native PostgreSQL data, original and
+project Docker client configurations, Git index). The previously reported 26 tracked
+artifacts remain untouched. No files were deleted/untracked and nothing was committed.
+Colima reports `Stopped`; both Homebrew services report Running/Loaded/Schedulable
+false. Neither service was started, so existing Docker resources were not changed.
+
+**Documented but not executed:** image build, Compose startup/readiness, authenticated
+`dbt debug`, live ingestion, `dbt build`, artifact export and shutdown/restart.
+These operation forms were checked against configuration/help and prior 7.1–7.3
+verification. Task 7.4 introduces no bootstrap automation or live validation claim.
+Only **7.4** is newly complete; **7.5 and all later tasks remain unchecked**.
+
+## Task 7.5 clean-volume live workflow verification
+
+Verified October 2, 2026. This is new live clean-volume evidence, separate from
+7.4's documentation-only checks and 7.3's synthetic runtime checks. No production,
+Compose, Dockerfile, test or dependency changes were necessary. The only workflow
+fix changes the Compose authentication probe to `dbt debug --connection`: plain
+`dbt debug` successfully authenticated but exited 1 because its dependency check
+requires Git, absent from the slim image. The connection-only command exited 0.
+The first attempt's logs and dbt artifacts are retained under `first-attempt/`;
+no ingestion occurred in that attempt, and its volumes were removed before retry.
+
+Evidence directory: `/private/tmp/data-platform-task75-20261002-a7c9`.
+It contains initial working-tree copies/diff/status, repository and external/index
+fingerprints, `commands.json` (exact argument arrays, return codes and durations),
+`host-commands.json`, redacted logs, verification helpers, full database snapshots,
+`database.sql`, `exported-archives/`, `exported-dbt/`, integration artifacts,
+`reconciliation.json`, `schema-modes.json`, `runtime-complete.json` and
+`task-only.diff`. Evidence is external and temporary; retain it elsewhere if needed
+beyond `/private/tmp`'s lifetime. Source credentials/passwords are not recorded.
+
+Isolation: project `data-platform-task75-20261002-a7c9`, unused loopback port
+`55475`, database/user `task75_validation`, generated in-memory password, source
+schema `raw`, output schema `analytics`. Initial Docker inventories contained no
+project resources; all three named volumes were new. The driver uses an explicit
+subprocess environment and reads only the two source credential values from `.env`
+into the environment of each live CLI process. It neither sources `.env` wholesale
+nor uses its database settings. Every Compose invocation uses `--env-file /dev/null`.
+Colima has no host directory mounts; no repository/native data is mounted or copied
+into the image. The existing toolchain/configuration is reused without upgrades.
+
+Exact host and driver entry commands, from the repository root:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task75-20261002-a7c9/host_checks.py
+env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+  DOCKER_CONFIG="$HOME/.config/data-platform/docker" \
+  DOCKER_HOST="unix://$HOME/.colima/data-platform/docker.sock" \
+  colima start data-platform --activate=false
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task75-20261002-a7c9/validate_live.py
+```
+
+The host driver disables dotenv loading, bytecode writes and dbt telemetry, opts
+out of database tests and supplies no source credentials. It runs five existing
+Compose checks. The sixth existing check, which intentionally selects a temporary
+synthetic env file, was omitted to honor this task's `/dev/null` constraint; its
+prior task-7.4 result is not claimed as a new check. No schema-resolution behavior
+changed; the enabled suite freshly verifies all three full-project schema modes.
+The narrow/default host commands are:
+
+```bash
+/private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/test_config.py tests/test_run_ingestion.py tests/test_dbt_sources.py \
+  --basetemp=/private/tmp/data-platform-task75-20261002-a7c9/host-narrow
+/private/tmp/data-platform-phase1-venv/bin/python -m pytest -q -p no:cacheprovider \
+  --basetemp=/private/tmp/data-platform-task75-20261002-a7c9/host-default
+```
+
+Initial results: **55 passed in 0.48s**, then **450 passed / 83 skipped in 1.82s**.
+The same narrow/default checks were repeated after documentation edits; final
+results are recorded below. No new unit tests were added for the documentation fix;
+the actual corrected runtime command was exercised against the new database.
+
+`dc75` below abbreviates the driver's exact Compose prefix, with the explicit
+private environment described above. Do not substitute an existing project for
+this disposable validation:
+
+```bash
+dc75() { docker compose --env-file /dev/null -p data-platform-task75-20261002-a7c9 \
+  -f /Users/patrick/Desktop/Code/data_platform/compose.yaml "$@"; }
+DOCKER_BUILDKIT=0 COMPOSE_BAKE=false dc75 build runtime
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python \
+  docker/validate_image.py data-platform-task75-20261002-a7c9-runtime:latest
+dc75 up -d --wait --wait-timeout 120
+dc75 ps --services --status running
+dc75 run -T --name data-platform-task75-20261002-a7c9-dbt-debug --rm runtime dbt debug --connection
+# Executed once with each name, using source credentials only for these commands:
+for iteration in 1 2; do
+  dc75 run -T --name "data-platform-task75-20261002-a7c9-live-$iteration" --rm \
+    runtime python -m src.ingestion.run_ingestion --entity all --batch-size 5 --max-batches 1
+done
+dc75 run -T --name data-platform-task75-20261002-a7c9-live-dbt-build --rm runtime dbt build
+```
+
+The current image built through the legacy builder without installing buildx.
+All three existing image/context checks passed, including packaged source parity,
+non-root execution and private/generated-file exclusions. `pip check`, actual CLI
+help and `dbt parse --no-partial-parse` passed in runtime containers with an external
+`offline.yaml` override setting `network_mode: none`; parse found 13 models, five
+sources and 46 tests. The image uses Python 3.11.16, dbt Core 1.12.5 and adapter
+1.11.0. Normal `up` selected only PostgreSQL. Initialization logs show the fresh
+cluster/database creation; health reports `healthy` and only `127.0.0.1:55475` is
+published. Runtime SQL authenticated `task75_validation` on `postgres:5432` as
+UID 10001. Before ingestion, there were **zero application tables/views** and no
+JSONL archives. Python and dbt subsequently created their own relations.
+
+| Entity | IDs observed in both requests | Raw rows after each run | Archives / successful run records after repeat |
+|---|---|---|---|
+| games | 1, 2, 3, 4, 5 | 5 / 5 | 2 / 2 |
+| genres | 2, 4, 5, 7, 8 | 5 / 5 | 2 / 2 |
+| platforms | 3, 4, 5, 6, 7 | 5 / 5 | 2 / 2 |
+| companies | 1, 2, 3, 4, 5 | 5 / 5 | 2 / 2 |
+| involved_companies | 2, 6, 7, 8, 9 | 5 / 5 | 2 / 2 |
+
+Each invocation returned five fetched/loaded records per entity: 25 processed
+records per command, 50 across both, and 25 distinct stored raw records. All ten
+metadata records are `succeeded`, have matching 5/5 counts, valid completion
+timestamps, NULL errors and **NULL watermark starts and ends**. Every JSONL object
+matches the corresponding stored payload; extracted name/slug fields match too.
+All 25 overlapping IDs refreshed `fetched_at`, no duplicates appeared, and prior
+run records/archives were retained. The verifier folds both archives by ID in
+request order, compares the union to stored rows and checks the latest payload,
+so changed source responses would be accounted for. This time there were zero
+changed IDs/payloads. Archives retain both observations; raw tables retain one
+latest-upsert version, not source history.
+
+`dbt build` exited 0: **13 models succeeded, 46 tests passed; zero warnings,
+errors or skips** (59 total nodes). The relation inventory is eight views and
+five tables. All staging fields were queried and compared to raw payloads and
+fetch times; existing independent Python reconciliation helpers then compared
+all catalog scalars/arrays, raw-derived bridge pairs and all five marts:
+
+| Models | Verified row counts |
+|---|---|
+| Five `stg_*` views | 5 each |
+| `int_game_genres`, `int_game_platforms`, `int_game_companies` | 11, 14, 5 |
+| `mart_game_catalog`, `mart_release_trends` | 5, 4 |
+| `mart_genre_performance`, `mart_platform_performance`, `mart_company_output` | 4, 9, 5 |
+
+Representative queried output: game 1 is *Thief II: The Metal Age*, released
+2000-03-21 UTC, with observed genre IDs 5/13/31 and platform 6. Genre IDs 13/31
+have NULL labels because those dimensions were not loaded. Release counts are
+1998: 2 and 2000/2004/2014: 1 each; their sum is five, with zero undated games.
+Genre/platform game-count sums are 11/14, matching distinct raw-array pairs.
+Company IDs 1/3/4/7/11 each contribute one relationship record and game reference;
+7/11 are unloaded companies, and three records reference unloaded games.
+The complete queried values, including metrics and nullable roles, are exported.
+These are observations from this new bounded load, even where they match earlier
+native-data samples.
+
+Persistence used `dc75 down` followed by
+`dc75 up -d --wait --wait-timeout 120 postgres`. The PostgreSQL container ID changed;
+all raw rows, ten run records and thirteen model outputs matched exactly, as did
+all archive/dbt file hashes. Fresh runtime containers could read the volumes as
+UID 10001. Reconciliation passed again without ingestion or dbt rebuild.
+
+Before cleanup, the following command exported database SQL without role passwords:
+
+```bash
+dc75 exec -T postgres pg_dump -U task75_validation -d task75_validation --no-owner --no-privileges
+``` A stopped task-owned `evidence-export` runtime container exposed both
+volumes to `docker cp`: `/app/data/raw/.` → `exported-archives/`, `/tmp/dbt/.` →
+`exported-dbt/`. Every copied file matched its recorded hash; there are ten JSONL
+files and retained dbt manifest/run-results/logs. The SQL dump was exported but
+not restore-tested. Exact export/probe commands and stdin helpers are retained.
+
+Then, with `RUN_POSTGRES_INTEGRATION=1` supplied by name, the driver ran narrow
+synthetic ingestion tests before the full applicable suite:
+
+```bash
+dc75 run -T --name data-platform-task75-20261002-a7c9-narrow-integration \
+  -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=25 --basetemp=/tmp/narrow-integration \
+  tests/integration/test_ingestion_postgres.py
+dc75 run -T --name data-platform-task75-20261002-a7c9-full-enabled \
+  -e RUN_POSTGRES_INTEGRATION runtime python -m pytest -q -p no:cacheprovider \
+  --strict-markers --durations=25 --basetemp=/tmp/full-enabled
+```
+
+Results: **15 passed in 0.99s**; **533 passed in 273.11s (0:04:33)**. The 65 dbt behavior scenarios,
+three full-project schema checks and 15 ingestion scenarios remain intact. Each
+schema mode freshly retained thirteen models and 46 passing tests. Integration
+fixtures used unique synthetic schemas and blocked HTTP requests; source credentials
+were absent. All disposable schemas were gone afterward, and another snapshot
+proved live raw/history/model data and volume files unchanged by the test suite.
+Test artifacts were copied from stopped containers before their removal.
+
+Final task cleanup used `dc75 --profile tools down --volumes`, then
+`docker image rm data-platform-task75-20261002-a7c9-runtime:latest`. Enabling the
+profile is necessary to include both runtime volumes: initial first-attempt
+`down --volumes` without it left those volumes; the preflight detected this and
+only those exact task-owned volumes were then removed before retry. No blanket
+cleanup occurred. Final container/volume/network/image inventories exactly match
+the original inventory, including the retained task-7.2 image. Build-cache layers
+may remain; no cache pruning was performed.
+
+Colima was stopped with `colima stop data-platform`. `colima list` reports Stopped;
+`brew services info postgresql@17` and `brew services info colima` report
+Running/Loaded/Schedulable false; native `pg_isready -h 127.0.0.1 -p 5432` reports
+no response (expected exit 2). No native PostgreSQL startup or login registration
+occurred. Preservation/review commands:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task75-20261002-a7c9/host_checks.py
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/data-platform-phase1-venv/bin/python /private/tmp/data-platform-task75-20261002-a7c9/review_docs.py
+git diff --check
+```
+
+Final host results: **55 passed in 0.46s**, then **450 passed / 83 skipped in
+1.82s**. All **210 relative links/anchors and 24 Bash blocks** pass review.
+Source credentials are absent from all 3,152 scanned evidence files; values were
+compared privately and never printed. Documentation links/anchors, Bash syntax,
+roadmap scope and whitespace checks pass. Only seven existing documentation files
+differ from the saved working tree; all other 12,854 repository files and all
+1,331 external/index fingerprints match, including `.env`, prior edits, archives,
+tracked generated artifacts, private files, native cluster data and both Docker
+client configurations. The previously reported 26 tracked artifacts were preserved.
+No files were added/deleted/untracked and the Git index is unchanged.
+
+Only **7.5** is newly checked. **Phase 7 is complete:** the documented Docker
+workflow created a database and ran the core pipeline from new volumes. Phase 8
+and later stay unchecked. This verifies bounded startup on this existing Mac/
+Colima toolchain, not task 10.7's clean-clone/new-machine reproducibility, full
+source/reference coverage, uncapped incremental bootstrap/checkpoint publication,
+or source snapshot isolation. Dependency ranges/base tags remain mutable. No
+startup automation, migration, watermark reset, data deletion from existing
+installations, repository artifact removal or commit was introduced.
